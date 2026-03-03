@@ -1,9 +1,18 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
 #import <libroot.h>
-#import <os/log.h>
 
-#define BB_LOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[BulletinBoardHook] " fmt, ##__VA_ARGS__)
+static void _bb_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void _bb_log(const char *fmt, ...) {
+	FILE *f = fopen(JBROOT_PATH_CSTRING("/basebin/hook_debug.log"), "a");
+	if (!f) return;
+	time_t t = time(NULL);
+	struct tm tm; localtime_r(&t, &tm);
+	fprintf(f, "%02d:%02d:%02d [BulletinBoard] ", tm.tm_hour, tm.tm_min, tm.tm_sec);
+	va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+	fprintf(f, "\n"); fclose(f);
+}
+#define BB_LOG(fmt, ...) _bb_log(fmt, ##__VA_ARGS__)
 
 static NSString *kSectionInfoPath = @"/var/mobile/Library/BulletinBoard/VersionedSectionInfo.plist";
 static NSString *kClearedSectionsPath = @"/var/mobile/Library/BulletinBoard/ClearedSections.plist";
@@ -71,8 +80,17 @@ static BOOL isClearedSectionsPlist(NSString *path)
 static void ensureJBBulletinBoardDir(void)
 {
 	NSString *dir = [jbNotificationPlistPath() stringByDeletingLastPathComponent];
+	BB_LOG("ensureJBBulletinBoardDir: path=%s", dir.UTF8String);
 	if (![[NSFileManager defaultManager] fileExistsAtPath:dir]) {
-		[[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+		NSError *error = nil;
+		BOOL ok = [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error];
+		if (!ok) {
+			BB_LOG("ERROR creating BulletinBoard dir: %s", error.localizedDescription.UTF8String);
+		} else {
+			BB_LOG("Created BulletinBoard dir OK");
+		}
+	} else {
+		BB_LOG("BulletinBoard dir already exists");
 	}
 }
 
@@ -88,7 +106,7 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 	if (gIsRouting || !path) return origData;
 
 	if (isBulletinBoardPlist(path)) {
-		BB_LOG("READ intercepted: %{public}@", path);
+		BB_LOG("READ intercepted: %s", path.UTF8String);
 		gIsRouting = YES;
 		refreshJBBundleIDsIfNeeded();
 
@@ -121,7 +139,7 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 	}
 
 	if (isClearedSectionsPlist(path)) {
-		BB_LOG("READ intercepted (ClearedSections): %{public}@", path);
+		BB_LOG("READ intercepted (ClearedSections): %s", path.UTF8String);
 		gIsRouting = YES;
 		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbClearedSectionsPath());
 		gIsRouting = NO;
@@ -164,7 +182,7 @@ static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString 
 	}
 
 	if (isBulletinBoardPlist(path) || isClearedSectionsPlist(path)) {
-		BB_LOG("WRITE intercepted: %{public}@", path);
+		BB_LOG("WRITE intercepted: %s", path.UTF8String);
 		gIsRouting = YES;
 		refreshJBBundleIDsIfNeeded();
 
@@ -214,7 +232,7 @@ static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString 
 
 void bulletinboarddInit(void)
 {
-	BB_LOG("bulletinboarddInit() called in process: %{public}s (pid=%d)", getprogname(), getpid());
+	BB_LOG("bulletinboarddInit() called in process: %s (pid=%d)", getprogname(), getpid());
 	refreshJBBundleIDs();
 	BB_LOG("Found %lu JB bundle IDs", (unsigned long)gJailbreakBundleIDs.count);
 	ensureJBBulletinBoardDir();

@@ -8,6 +8,18 @@
 #import <unistd.h>
 #import <notify.h>
 
+static void _sb_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void _sb_log(const char *fmt, ...) {
+	FILE *f = fopen(JBROOT_PATH_CSTRING("/basebin/hook_debug.log"), "a");
+	if (!f) return;
+	time_t t = time(NULL);
+	struct tm tm; localtime_r(&t, &tm);
+	fprintf(f, "%02d:%02d:%02d [SpringBoard] ", tm.tm_hour, tm.tm_min, tm.tm_sec);
+	va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+	fprintf(f, "\n"); fclose(f);
+}
+#define SB_LOG(fmt, ...) _sb_log(fmt, ##__VA_ARGS__)
+
 bool string_has_prefix(const char *str, const char* prefix)
 {
 	if (!str || !prefix) {
@@ -71,6 +83,8 @@ bool string_has_prefix(const char *str, const char* prefix)
 
 void springboardInit(void)
 {
+	SB_LOG("springboardInit() called (pid=%d)", getpid());
+
 	const char *uicacheDoneFlagPath = JBROOT_PATH_CSTRING("/basebin/.uicache_done");
 	const char *rebuildLockPath = JBROOT_PATH_CSTRING("/basebin/.lsd_rebuilding");
 	// Created by SpringBoard, deleted by lsd.x when _LSServer_RebuildApplicationDatabases
@@ -78,16 +92,26 @@ void springboardInit(void)
 	const char *sbSessionFlag = JBROOT_PATH_CSTRING("/basebin/.sb_session");
 
 	bool isRespring = (access(sbSessionFlag, F_OK) == 0);
+	SB_LOG("isRespring=%d sbSessionFlag=%s", isRespring, sbSessionFlag);
 
 	if (!isRespring) {
-		// Userspace reboot or first activation: icons are lost.
-		// Wait for uicache to complete (run by lsd.x after DB rebuild).
-		// We are in %ctor — UI and run loop are NOT active yet.
+		// Userspace reboot or first activation: icons are lost after lsd rebuild.
 		//
-		// NEVER run uicache from SpringBoard — it can deadlock if lsd isn't
-		// ready, causing ldrestart to freeze the device.
+		// CRITICAL: jbctl startup creates .uicache_done BEFORE lsd starts.
+		// But then lsd's _LSServer_RebuildApplicationDatabases WIPES all
+		// registrations. We must wait for lsd's POST-rebuild uicache, not
+		// jbctl's premature one.
+		//
+		// Delete any stale .uicache_done from jbctl, then wait for lsd
+		// to create a fresh one after its rebuild + re-uicache.
+		unlink(uicacheDoneFlagPath);
+		SB_LOG("Deleted stale .uicache_done, entering wait loop");
+
+		// NEVER run uicache from SpringBoard synchronously — it can deadlock
+		// if lsd isn't ready, causing ldrestart to freeze the device.
 		//
 		// Wait up to 25s. SpringBoard watchdog is ~30s, leave margin.
+		bool gotSignal = false;
 		for (int i = 0; i < 250; i++) {
 			// If lsd is rebuilding, any existing .uicache_done is stale — keep waiting.
 			if (access(rebuildLockPath, F_OK) == 0) {
@@ -95,10 +119,28 @@ void springboardInit(void)
 				continue;
 			}
 			if (access(uicacheDoneFlagPath, F_OK) == 0) {
+				SB_LOG("Got .uicache_done signal after %d iterations (%dms)", i, i * 100);
 				unlink(uicacheDoneFlagPath);
+				gotSignal = true;
 				break;
 			}
 			usleep(100000); // 100ms
+		}
+
+		if (!gotSignal) {
+			// Timeout — lsd hook may not have fired. Run uicache ASYNC as
+			// fallback. Async is safe: SpringBoard's run loop will be active
+			// so uicache can communicate with lsd normally. No deadlock risk.
+			SB_LOG("WARNING: Timed out waiting for lsd signal, dispatching fallback uicache");
+			dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+				const char *uicachePath = JBROOT_PATH_CSTRING("/usr/bin/uicache");
+				if (!access(uicachePath, F_OK)) {
+					SB_LOG("Running fallback uicache -a");
+					exec_cmd(uicachePath, "-a", NULL);
+					SB_LOG("Fallback uicache completed");
+					notify_post("com.apple.mobile.application_installed");
+				}
+			});
 		}
 	}
 	// else: respring — lsd still running, icon cache intact, skip.
