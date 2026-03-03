@@ -33,4 +33,8 @@ NSString* getProcessName()
 		extern void lsdInit(void);
 		lsdInit();
 	}
+	else if ([processName isEqualToString:@"tccd"]) {
+		extern void tccdInit(void);
+		tccdInit();
+	}
 }

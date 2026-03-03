@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 #import <libjailbreak/libjailbreak.h>
 #import <sys/mount.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 SInt32 CFUserNotificationDisplayAlert(CFTimeInterval timeout, CFOptionFlags flags, CFURLRef iconURL, CFURLRef soundURL, CFURLRef localizationURL, CFStringRef alertHeader, CFStringRef alertMessage, CFStringRef defaultButtonTitle, CFStringRef alternateButtonTitle, CFStringRef otherButtonTitle, CFOptionFlags *responseFlags) API_AVAILABLE(ios(3.0));
 
@@ -176,7 +178,12 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 			CFUserNotificationDisplayAlert(0, 2/*kCFUserNotificationCautionAlertLevel*/, NULL, NULL, NULL, CFSTR("Watchdog Timeout"), (__bridge CFStringRef)printMessage, NULL, NULL, NULL, NULL);
 			free(panicMessage);
 		}
+
 		exec_cmd(JBROOT_PATH("/usr/bin/uicache"), "-a", NULL);
+
+		const char *uicacheDoneFlagPath = JBROOT_PATH("/basebin/.uicache_done");
+		int fd = open(uicacheDoneFlagPath, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+		if (fd >= 0) close(fd);
 	}
 	else if (!strcmp(command, "install_pkg")) {
 		if (argc > 1) {

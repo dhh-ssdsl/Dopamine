@@ -1,8 +1,11 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
 #import <objc/objc.h>
+#import <objc/runtime.h>
 #import <libroot.h>
+#import <libjailbreak/util.h>
 #import <fcntl.h>
+#import <unistd.h>
 
 bool string_has_prefix(const char *str, const char* prefix)
 {
@@ -67,5 +70,24 @@ bool string_has_prefix(const char *str, const char* prefix)
 
 void springboardInit(void)
 {
+	const char *uicachePath = JBROOT_PATH_CSTRING("/usr/bin/uicache");
+	const char *uicacheDoneFlagPath = JBROOT_PATH_CSTRING("/basebin/.uicache_done");
+
+	bool needRunUICache = true;
+	for (int i = 0; i < 100; i++) {
+		if (access(uicacheDoneFlagPath, F_OK) == 0) {
+			needRunUICache = false;
+			unlink(uicacheDoneFlagPath);
+			break;
+		}
+		usleep(100000);
+	}
+
+	if (needRunUICache && !access(uicachePath, F_OK)) {
+		exec_cmd(uicachePath, "-a", NULL);
+		int fd = open(uicacheDoneFlagPath, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+		if (fd >= 0) close(fd);
+	}
+
 	%init();
 }
