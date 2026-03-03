@@ -56,7 +56,13 @@ static void sqlite_jb_is_client(sqlite3_context *context, int argc, sqlite3_valu
 
 static void initializeTCCRouting(sqlite3 *db)
 {
-	const char *jbTCCPath = JBROOT_PATH_CSTRING("/basebin/.jb_tcc.db");
+	const char *jbTCCDir = JBROOT_PATH_CSTRING("/private/var/mobile/Library/TCC");
+	NSString *tccDir = [NSString stringWithUTF8String:jbTCCDir];
+	if (![[NSFileManager defaultManager] fileExistsAtPath:tccDir]) {
+		[[NSFileManager defaultManager] createDirectoryAtPath:tccDir withIntermediateDirectories:YES attributes:nil error:nil];
+	}
+
+	const char *jbTCCPath = JBROOT_PATH_CSTRING("/private/var/mobile/Library/TCC/.jb_tcc.db");
 	char attachSQL[1024];
 	snprintf(attachSQL, sizeof(attachSQL), "ATTACH DATABASE '%s' AS jbtcc", jbTCCPath);
 	sqlite3_exec(db, attachSQL, NULL, NULL, NULL);
