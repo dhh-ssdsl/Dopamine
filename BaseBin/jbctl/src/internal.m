@@ -181,7 +181,7 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 
 		exec_cmd(JBROOT_PATH("/usr/bin/uicache"), "-a", NULL);
 
-		const char *uicacheDoneFlagPath = JBROOT_PATH("/basebin/.uicache_done");
+		const char *uicacheDoneFlagPath = "/private/var/tmp/.uicache_done";
 		int fd = open(uicacheDoneFlagPath, O_CREAT | O_WRONLY | O_TRUNC, 0644);
 		if (fd >= 0) close(fd);
 	}

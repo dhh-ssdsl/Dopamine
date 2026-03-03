@@ -10,7 +10,7 @@
 
 static void _sb_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void _sb_log(const char *fmt, ...) {
-	FILE *f = fopen(JBROOT_PATH_CSTRING("/basebin/hook_debug.log"), "a");
+	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
 	if (!f) return;
 	time_t t = time(NULL);
 	struct tm tm; localtime_r(&t, &tm);
@@ -85,11 +85,11 @@ void springboardInit(void)
 {
 	SB_LOG("springboardInit() called (pid=%d)", getpid());
 
-	const char *uicacheDoneFlagPath = JBROOT_PATH_CSTRING("/basebin/.uicache_done");
-	const char *rebuildLockPath = JBROOT_PATH_CSTRING("/basebin/.lsd_rebuilding");
-	// Created by SpringBoard, deleted by lsd.x when _LSServer_RebuildApplicationDatabases
-	// fires (which only happens during userspace reboot, not respring).
-	const char *sbSessionFlag = JBROOT_PATH_CSTRING("/basebin/.sb_session");
+	const char *uicacheDoneFlagPath = "/private/var/tmp/.uicache_done";
+	const char *rebuildLockPath = "/private/var/tmp/.lsd_rebuilding";
+	// Stored in /private/var/tmp/ which is cleared on userspace reboot but
+	// preserved across resprings — no need for lsd to manually delete it.
+	const char *sbSessionFlag = "/private/var/tmp/.sb_session";
 
 	bool isRespring = (access(sbSessionFlag, F_OK) == 0);
 	SB_LOG("isRespring=%d sbSessionFlag=%s", isRespring, sbSessionFlag);

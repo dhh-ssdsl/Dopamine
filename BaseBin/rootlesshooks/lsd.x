@@ -7,7 +7,7 @@
 
 static void _lsd_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void _lsd_log(const char *fmt, ...) {
-	FILE *f = fopen(JBROOT_PATH_CSTRING("/basebin/hook_debug.log"), "a");
+	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
 	if (!f) return;
 	time_t t = time(NULL);
 	struct tm tm; localtime_r(&t, &tm);
@@ -32,7 +32,7 @@ static void _lsd_log(const char *fmt, ...) {
 
 	// Place a lock BEFORE calling orig — this tells SpringBoard that a
 	// database rebuild is in progress and any existing .uicache_done is stale.
-	const char *rebuildLockPath = JBROOT_PATH_CSTRING("/basebin/.lsd_rebuilding");
+	const char *rebuildLockPath = "/private/var/tmp/.lsd_rebuilding";
 	int lockFd = open(rebuildLockPath, O_CREAT | O_WRONLY | O_TRUNC, 0644);
 	if (lockFd >= 0) close(lockFd);
 
@@ -42,12 +42,10 @@ static void _lsd_log(const char *fmt, ...) {
 	// The rebuild WIPES any earlier app registrations (e.g. from jbctl startup),
 	// so we must re-run uicache AFTER this rebuild completes.
 
-	// Delete SpringBoard session marker so it knows this is userspace reboot.
-	const char *sbSessionFlag = JBROOT_PATH_CSTRING("/basebin/.sb_session");
-	unlink(sbSessionFlag);
-
 	// Invalidate any premature .uicache_done from jbctl startup.
-	const char *uicacheDoneFlagPath = JBROOT_PATH_CSTRING("/basebin/.uicache_done");
+	// Note: .sb_session in /private/var/tmp/ is automatically cleared on
+	// userspace reboot, so no need to manually delete it here.
+	const char *uicacheDoneFlagPath = "/private/var/tmp/.uicache_done";
 	unlink(uicacheDoneFlagPath);
 
 	LSD_LOG("Dispatching async uicache after rebuild");

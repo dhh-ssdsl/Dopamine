@@ -4,7 +4,7 @@
 
 static void _bb_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void _bb_log(const char *fmt, ...) {
-	FILE *f = fopen(JBROOT_PATH_CSTRING("/basebin/hook_debug.log"), "a");
+	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
 	if (!f) return;
 	time_t t = time(NULL);
 	struct tm tm; localtime_r(&t, &tm);
