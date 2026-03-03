@@ -39,7 +39,7 @@ NSString* getProcessName()
 		extern void tccdInit(void);
 		tccdInit();
 	}
-	else if ([processName isEqualToString:@"CommCenter"]) {
+	else if ([processName isEqualToString:@"CommCenter"] || [processName isEqualToString:@"CommCenterMobileHelper"]) {
 		extern void commcenterInit(void);
 		commcenterInit();
 	}

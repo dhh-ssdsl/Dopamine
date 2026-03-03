@@ -191,8 +191,24 @@ static int hook_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags,
 
 static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail)
 {
-	if (db != gCellularDB || !zSql) {
+	if (!zSql) {
 		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+	}
+
+	// CommCenter keeps CellularUsage.db open permanently.
+	// If the DB was already open before our hook fired (gCellularDB == NULL),
+	// detect it here via sqlite3_db_filename() on every prepare call until found.
+	if (db != gCellularDB) {
+		const char *filename = sqlite3_db_filename(db, "main");
+		if (filename && strstr(filename, "CellularUsage.db")) {
+			CC_LOG("CellularUsage.db found via prepare hook (already open): %s", filename);
+			gCellularDB = db;
+			sqlite3_create_function(db, "jb_is_client", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_jb_is_client, NULL, NULL);
+			initializeCellularRouting(db);
+			CC_LOG("Cellular routing late-initialized");
+		} else {
+			return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+		}
 	}
 
 	NSString *sql = [NSString stringWithUTF8String:zSql];
