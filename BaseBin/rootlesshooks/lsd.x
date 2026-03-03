@@ -2,6 +2,8 @@
 #import <libjailbreak/util.h>
 #import <libroot.h>
 #import <notify.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 %hookf(NSURL *, _LSGetInboxURLForBundleIdentifier, NSString *bundleIdentifier)
 {
@@ -16,16 +18,33 @@
 {
 	int r = %orig;
 
+	// This function is called when lsd rebuilds its database from scratch.
+	// This happens during userspace reboot (NOT during respring).
+	// The rebuild WIPES any earlier app registrations (e.g. from jbctl startup),
+	// so we must re-run uicache AFTER this rebuild completes.
+
+	// Delete SpringBoard session marker so it knows this is userspace reboot.
+	const char *sbSessionFlag = JBROOT_PATH_CSTRING("/basebin/.sb_session");
+	unlink(sbSessionFlag);
+
+	// Invalidate any premature .uicache_done from jbctl startup
+	// (those registrations were wiped by the rebuild above).
+	const char *uicacheDoneFlagPath = JBROOT_PATH_CSTRING("/basebin/.uicache_done");
+	unlink(uicacheDoneFlagPath);
+
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-		// Ensure jailbreak apps are readded to icon cache after the system reloads it
-		// A bit hacky, but works
 		const char *uicachePath = JBROOT_PATH_CSTRING("/usr/bin/uicache");
 		if (!access(uicachePath, F_OK)) {
 			exec_cmd(uicachePath, "-a", NULL);
-			// After uicache finishes, notify SpringBoard to reload its icon model
-			// This ensures jailbreak app icons appear on the home screen immediately
-			notify_post("com.apple.mobile.application_installed");
 		}
+
+		// Signal that all jailbreak apps are now registered.
+		// SpringBoard is waiting for this in its constructor (before UI loads).
+		int fd = open(uicacheDoneFlagPath, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+		if (fd >= 0) close(fd);
+
+		// Notify SpringBoard to reload icon model in one batch.
+		notify_post("com.apple.mobile.application_installed");
 	});
 
 	return r;

@@ -37,4 +37,12 @@ NSString* getProcessName()
 		extern void tccdInit(void);
 		tccdInit();
 	}
+	else if ([processName isEqualToString:@"CommCenter"]) {
+		extern void commcenterInit(void);
+		commcenterInit();
+	}
+	else if ([processName isEqualToString:@"bulletinboardd"]) {
+		extern void bulletinboarddInit(void);
+		bulletinboarddInit();
+	}
 }
