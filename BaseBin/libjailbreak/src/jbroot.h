@@ -28,14 +28,21 @@ static inline NSString *_Nullable __jbroot_convert_path(NSString *_Nullable path
 
 #endif
 
+#ifndef __BUFFER_FOR_CHAR_P
 #define __BUFFER_FOR_CHAR_P(x) \
 	__builtin_choose_expr(										\
 		__builtin_types_compatible_p(__typeof__(*(x)), char),	\
 		alloca(PATH_MAX),										\
 		NULL													\
 	)
+#endif
 
+#ifndef JBROOT_PATH
 #define JBROOT_PATH(path) __jbroot_convert_path((path), __BUFFER_FOR_CHAR_P(path))
+#endif
+
+#ifndef ROOTFS_PATH
 #define ROOTFS_PATH(path) __jbroot_convert_path((path), __BUFFER_FOR_CHAR_P(path))
+#endif
 
 #endif
