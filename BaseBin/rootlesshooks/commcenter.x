@@ -3,6 +3,10 @@
 #import <sqlite3.h>
 #import <libroot.h>
 
+// sqlite3_db_filename is available since SQLite 3.7.10 / iOS 6+
+// Declare it explicitly in case the SDK header is too old
+extern const char *sqlite3_db_filename(sqlite3 *db, const char *zDbName);
+
 static void _cc_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void _cc_log(const char *fmt, ...) {
 	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
@@ -20,7 +24,9 @@ static NSSet<NSString *> *gJailbreakBundleIDs = nil;
 static time_t gLastBundleRefresh = 0;
 
 static int (*orig_sqlite3_open_v2)(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
+static int (*orig_sqlite3_open)(const char *filename, sqlite3 **ppDb);
 static int (*orig_sqlite3_prepare_v2)(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+static int (*orig_sqlite3_exec)(sqlite3 *db, const char *sql, int (*callback)(void*,int,char**,char**), void *arg, char **errmsg);
 
 static void refreshJBBundleIDs(void)
 {
@@ -175,16 +181,31 @@ static NSString *rewriteSQLForCellularRouter(NSString *sql)
 	return sql;
 }
 
+static void setupCellularDB(sqlite3 *db, const char *filename)
+{
+	CC_LOG("CellularUsage.db detected: %s", filename ?: "(null)");
+	gCellularDB = db;
+	sqlite3_create_function(db, "jb_is_client", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_jb_is_client, NULL, NULL);
+	initializeCellularRouting(db);
+	CC_LOG("Cellular routing initialized");
+}
+
+static int hook_sqlite3_open(const char *filename, sqlite3 **ppDb)
+{
+	int r = orig_sqlite3_open(filename, ppDb);
+	CC_LOG("sqlite3_open: %s -> %d", filename ?: "(null)", r);
+	if (r == SQLITE_OK && filename && strstr(filename, "CellularUsage.db")) {
+		setupCellularDB(*ppDb, filename);
+	}
+	return r;
+}
+
 static int hook_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs)
 {
 	int r = orig_sqlite3_open_v2(filename, ppDb, flags, zVfs);
 	CC_LOG("sqlite3_open_v2: %s -> %d", filename ?: "(null)", r);
 	if (r == SQLITE_OK && filename && strstr(filename, "CellularUsage.db")) {
-		CC_LOG("CellularUsage.db detected! Setting up routing...");
-		gCellularDB = *ppDb;
-		sqlite3_create_function(gCellularDB, "jb_is_client", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_jb_is_client, NULL, NULL);
-		initializeCellularRouting(gCellularDB);
-		CC_LOG("Cellular routing initialized");
+		setupCellularDB(*ppDb, filename);
 	}
 	return r;
 }
@@ -200,6 +221,11 @@ static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sql
 	// detect it here via sqlite3_db_filename() on every prepare call until found.
 	if (db != gCellularDB) {
 		const char *filename = sqlite3_db_filename(db, "main");
+		static int diagCount = 0;
+		if (diagCount < 20) {
+			diagCount++;
+			CC_LOG("prepare_v2[%d]: db=%p filename=%s sql=%.80s", diagCount, (void*)db, filename ?: "(null)", zSql);
+		}
 		if (filename && strstr(filename, "CellularUsage.db")) {
 			CC_LOG("CellularUsage.db found via prepare hook (already open): %s", filename);
 			gCellularDB = db;
@@ -224,13 +250,30 @@ static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sql
 	return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
 }
 
+static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*,int,char**,char**), void *arg, char **errmsg)
+{
+	if (db && db != gCellularDB) {
+		const char *filename = sqlite3_db_filename(db, "main");
+		if (filename && strstr(filename, "CellularUsage.db")) {
+			CC_LOG("CellularUsage.db found via exec hook: %s", filename);
+			gCellularDB = db;
+			sqlite3_create_function(db, "jb_is_client", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_jb_is_client, NULL, NULL);
+			initializeCellularRouting(db);
+			CC_LOG("Cellular routing late-initialized via exec");
+		}
+	}
+	return orig_sqlite3_exec(db, sql, callback, arg, errmsg);
+}
+
 void commcenterInit(void)
 {
 	CC_LOG("commcenterInit() called (pid=%d)", getpid());
 	refreshJBBundleIDs();
 	CC_LOG("Found %lu JB bundle IDs", (unsigned long)gJailbreakBundleIDs.count);
 
+	MSHookFunction(sqlite3_open, (void *)hook_sqlite3_open, (void **)&orig_sqlite3_open);
 	MSHookFunction(sqlite3_open_v2, (void *)hook_sqlite3_open_v2, (void **)&orig_sqlite3_open_v2);
 	MSHookFunction(sqlite3_prepare_v2, (void *)hook_sqlite3_prepare_v2, (void **)&orig_sqlite3_prepare_v2);
-	CC_LOG("sqlite3 hooks installed");
+	MSHookFunction(sqlite3_exec, (void *)hook_sqlite3_exec, (void **)&orig_sqlite3_exec);
+	CC_LOG("sqlite3 hooks installed (open + open_v2 + prepare_v2 + exec)");
 }
