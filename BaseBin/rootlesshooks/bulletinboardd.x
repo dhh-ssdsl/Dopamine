@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
 #import <libroot.h>
+#import <objc/runtime.h>
 
 static void _bb_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void _bb_log(const char *fmt, ...) {
@@ -243,10 +244,12 @@ static BOOL hook_NSData_writeToFile_options_error(NSData *self, SEL _cmd, NSStri
 		BB_LOG("WRITE(options:error:) intercepted: %s", path.UTF8String);
 		gIsRouting = YES;
 		__block BOOL result = YES;
+		__block NSError *capturedError = nil;
 		performSplitWrite(self, path,
-			^BOOL(NSData *d, NSString *p) { result = orig_NSData_writeToFile_options_error(d, _cmd, p, options, error); return result; },
+			^BOOL(NSData *d, NSString *p) { result = orig_NSData_writeToFile_options_error(d, _cmd, p, options, &capturedError); return result; },
 			^BOOL(NSData *d, NSString *p) { return orig_NSData_writeToFile_options_error(d, _cmd, p, options, nil); }
 		);
+		if (error) *error = capturedError;
 		gIsRouting = NO;
 		return result;
 	}
