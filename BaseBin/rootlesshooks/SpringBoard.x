@@ -72,26 +72,28 @@ bool string_has_prefix(const char *str, const char* prefix)
 void springboardInit(void)
 {
 	const char *uicacheDoneFlagPath = JBROOT_PATH_CSTRING("/basebin/.uicache_done");
+	const char *rebuildLockPath = JBROOT_PATH_CSTRING("/basebin/.lsd_rebuilding");
 	// Created by SpringBoard, deleted by lsd.x when _LSServer_RebuildApplicationDatabases
 	// fires (which only happens during userspace reboot, not respring).
-	// Present -> respring (lsd didn't restart, icons intact).
-	// Absent  -> userspace reboot or first boot (lsd restarted, icons lost).
 	const char *sbSessionFlag = JBROOT_PATH_CSTRING("/basebin/.sb_session");
 
 	bool isRespring = (access(sbSessionFlag, F_OK) == 0);
 
 	if (!isRespring) {
 		// Userspace reboot or first activation: icons are lost.
-		// Wait for uicache to complete (run by lsd.x or jbctl startup).
+		// Wait for uicache to complete (run by lsd.x after DB rebuild).
 		// We are in %ctor — UI and run loop are NOT active yet.
-		// Notifications from uicache queue up and will be processed
-		// all at once when SpringBoard's run loop starts -> icons appear in batch.
 		//
 		// NEVER run uicache from SpringBoard — it can deadlock if lsd isn't
 		// ready, causing ldrestart to freeze the device.
 		//
-		// Wait up to 20s. SpringBoard watchdog is ~30s, leave margin.
-		for (int i = 0; i < 200; i++) {
+		// Wait up to 25s. SpringBoard watchdog is ~30s, leave margin.
+		for (int i = 0; i < 250; i++) {
+			// If lsd is rebuilding, any existing .uicache_done is stale — keep waiting.
+			if (access(rebuildLockPath, F_OK) == 0) {
+				usleep(100000);
+				continue;
+			}
 			if (access(uicacheDoneFlagPath, F_OK) == 0) {
 				unlink(uicacheDoneFlagPath);
 				break;

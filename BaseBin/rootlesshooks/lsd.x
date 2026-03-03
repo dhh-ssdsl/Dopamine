@@ -16,10 +16,14 @@
 
 %hookf(int, _LSServer_RebuildApplicationDatabases)
 {
+	// Place a lock BEFORE calling orig — this tells SpringBoard that a
+	// database rebuild is in progress and any existing .uicache_done is stale.
+	const char *rebuildLockPath = JBROOT_PATH_CSTRING("/basebin/.lsd_rebuilding");
+	int lockFd = open(rebuildLockPath, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+	if (lockFd >= 0) close(lockFd);
+
 	int r = %orig;
 
-	// This function is called when lsd rebuilds its database from scratch.
-	// This happens during userspace reboot (NOT during respring).
 	// The rebuild WIPES any earlier app registrations (e.g. from jbctl startup),
 	// so we must re-run uicache AFTER this rebuild completes.
 
@@ -27,8 +31,7 @@
 	const char *sbSessionFlag = JBROOT_PATH_CSTRING("/basebin/.sb_session");
 	unlink(sbSessionFlag);
 
-	// Invalidate any premature .uicache_done from jbctl startup
-	// (those registrations were wiped by the rebuild above).
+	// Invalidate any premature .uicache_done from jbctl startup.
 	const char *uicacheDoneFlagPath = JBROOT_PATH_CSTRING("/basebin/.uicache_done");
 	unlink(uicacheDoneFlagPath);
 
@@ -38,12 +41,12 @@
 			exec_cmd(uicachePath, "-a", NULL);
 		}
 
-		// Signal that all jailbreak apps are now registered.
-		// SpringBoard is waiting for this in its constructor (before UI loads).
+		// Remove the rebuild lock, then signal done.
+		unlink(rebuildLockPath);
+
 		int fd = open(uicacheDoneFlagPath, O_CREAT | O_WRONLY | O_TRUNC, 0644);
 		if (fd >= 0) close(fd);
 
-		// Notify SpringBoard to reload icon model in one batch.
 		notify_post("com.apple.mobile.application_installed");
 	});
 

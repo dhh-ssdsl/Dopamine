@@ -1,6 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
 #import <libroot.h>
+#import <os/log.h>
+
+#define BB_LOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[BulletinBoardHook] " fmt, ##__VA_ARGS__)
 
 static NSString *kSectionInfoPath = @"/var/mobile/Library/BulletinBoard/VersionedSectionInfo.plist";
 static NSString *kClearedSectionsPath = @"/var/mobile/Library/BulletinBoard/ClearedSections.plist";
@@ -85,6 +88,7 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 	if (gIsRouting || !path) return origData;
 
 	if (isBulletinBoardPlist(path)) {
+		BB_LOG("READ intercepted: %{public}@", path);
 		gIsRouting = YES;
 		refreshJBBundleIDsIfNeeded();
 
@@ -117,6 +121,7 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 	}
 
 	if (isClearedSectionsPlist(path)) {
+		BB_LOG("READ intercepted (ClearedSections): %{public}@", path);
 		gIsRouting = YES;
 		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbClearedSectionsPath());
 		gIsRouting = NO;
@@ -159,6 +164,7 @@ static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString 
 	}
 
 	if (isBulletinBoardPlist(path) || isClearedSectionsPlist(path)) {
+		BB_LOG("WRITE intercepted: %{public}@", path);
 		gIsRouting = YES;
 		refreshJBBundleIDsIfNeeded();
 
@@ -208,7 +214,9 @@ static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString 
 
 void bulletinboarddInit(void)
 {
+	BB_LOG("bulletinboarddInit() called in process: %{public}s (pid=%d)", getprogname(), getpid());
 	refreshJBBundleIDs();
+	BB_LOG("Found %lu JB bundle IDs", (unsigned long)gJailbreakBundleIDs.count);
 	ensureJBBulletinBoardDir();
 
 	// Hook NSData +dataWithContentsOfFile: for read interception

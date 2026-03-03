@@ -26,6 +26,8 @@ NSString* getProcessName()
 		cfprefsdInit();
 	}
 	else if ([processName isEqualToString:@"SpringBoard"]) {
+		extern void bulletinboarddInit(void);
+		bulletinboarddInit();
 		extern void springboardInit(void);
 		springboardInit();
 	}
@@ -40,9 +42,5 @@ NSString* getProcessName()
 	else if ([processName isEqualToString:@"CommCenter"]) {
 		extern void commcenterInit(void);
 		commcenterInit();
-	}
-	else if ([processName isEqualToString:@"bulletinboardd"]) {
-		extern void bulletinboarddInit(void);
-		bulletinboarddInit();
 	}
 }

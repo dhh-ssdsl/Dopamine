@@ -362,7 +362,8 @@ __attribute__((constructor)) static void initializer(void)
 		if (!strcmp(gExecutablePath, "/usr/sbin/cfprefsd") ||
 			!strcmp(gExecutablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ||
 			!strcmp(gExecutablePath, "/usr/libexec/lsd") ||
-			!strcmp(gExecutablePath, "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd")) {
+			!strcmp(gExecutablePath, "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd") ||
+			!strcmp(gExecutablePath, "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter")) {
 			dlopen(JBROOT_PATH("/basebin/rootlesshooks.dylib"), RTLD_NOW);
 		}
 		else if (!strcmp(gExecutablePath, "/usr/libexec/watchdogd")) {
