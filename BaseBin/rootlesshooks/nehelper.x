@@ -2,6 +2,7 @@
 #import <substrate.h>
 #import <libroot.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 // ============================================================
 // Logging
@@ -41,8 +42,10 @@ static BOOL isJBBundleID(NSString *bundleID)
 	if (!bundleID.length) return NO;
 
 	Class LSProxy = NSClassFromString(@"LSApplicationProxy");
-	if (LSProxy) {
-		id proxy = [LSProxy applicationProxyForIdentifier:bundleID];
+	SEL sel = NSSelectorFromString(@"applicationProxyForIdentifier:");
+	if (LSProxy && [LSProxy respondsToSelector:sel]) {
+		id (*msgSend)(id, SEL, id) = (void *)objc_msgSend;
+		id proxy = msgSend(LSProxy, sel, bundleID);
 		NSString *bundlePath = [[proxy valueForKey:@"bundleURL"] path];
 		if (bundlePath.length) {
 			return [bundlePath hasPrefix:jbRootPrefix()];
