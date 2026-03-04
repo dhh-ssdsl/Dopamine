@@ -47,14 +47,5 @@ NSString* getProcessName()
 		extern void nehelperInit(void);
 		nehelperInit();
 	}
-	else if ([processName isEqualToString:@"Preferences"]) {
-		// Settings.app runs as its own process named "Preferences".
-		// It reads BulletinBoard plists directly via NSData to show
-		// "Settings → Notifications". Install read-only hooks so it
-		// sees merged JB app notification entries from the JB-side plist.
-		// (Confirmed via ps aux: /Applications/Preferences.app/Preferences
-		//  runs as a standalone process; no bulletind/usernoted on this device.)
-		extern void bulletinboarddReadOnlyInit(void);
-		bulletinboarddReadOnlyInit();
 	}
 }
