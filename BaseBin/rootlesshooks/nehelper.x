@@ -186,11 +186,12 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 }
 
 // ============================================================
-// Constructor — called automatically when dylib is loaded
+// nehelperInit — called by main.x %ctor when process is nehelper
 // ============================================================
 
-%ctor {
-	NE_LOG("nehelper hook loaded in process: %s (pid=%d)", getprogname(), getpid());
+void nehelperInit(void)
+{
+	NE_LOG("nehelperInit() called in process: %s (pid=%d)", getprogname(), getpid());
 
 	// Delayed class method scan (wait for NE classes to initialize)
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -207,7 +208,7 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 		    @selector(encodeObject:forKey:),
 		    (IMP)hook_encode_object_forKey,
 		    (IMP *)&orig_encode_object_forKey);
-		NE_LOG("nehelper hook: NSKeyedArchiver probe installed");
+		NE_LOG("nehelperInit: NSKeyedArchiver probe installed");
 	}
 
 	// Hook NSKeyedUnarchiver
@@ -217,8 +218,8 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 		    @selector(decodeObjectForKey:),
 		    (IMP)hook_decode_object_forKey,
 		    (IMP *)&orig_decode_object_forKey);
-		NE_LOG("nehelper hook: NSKeyedUnarchiver probe installed");
+		NE_LOG("nehelperInit: NSKeyedUnarchiver probe installed");
 	}
 
-	NE_LOG("nehelper hook: all probes installed");
+	NE_LOG("nehelperInit: all probes installed");
 }
