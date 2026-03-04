@@ -3,11 +3,9 @@
 #import <libroot.h>
 #import <objc/runtime.h>
 
-// LSApplicationProxy forward declaration (MobileCoreServices private)
-@interface LSApplicationProxy : NSObject
-+ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
-@property (nonatomic, readonly) NSURL *bundleURL;
-@end
+// ============================================================
+// Logging
+// ============================================================
 
 static void _ne_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void _ne_log(const char *fmt, ...) {
@@ -65,196 +63,109 @@ static BOOL isJBBundleID(NSString *bundleID)
 }
 
 // ============================================================
-// NSKeyedArchiver / NSKeyedUnarchiver DIAGNOSTIC HOOKS
-//
-// Purpose: log every key encountered during NE plist encode/decode
-// so we can find the exact key that contains per-app network rules.
-// Once identified, replace with routing logic.
+// Dynamic method probe: hooks every instance method of a class,
+// logs when the method is called.
 // ============================================================
 
+// Generic trampoline that logs method name when called.
+// We use a single global IMP array trick with libffi or similar.
+// Since we don't have libffi, use a simpler approach:
+// just hook 'methods that look like save/load/write/update/commit/serialize'.
 
-// -- NSKeyedArchiver hooks --
+typedef void (*VoidIMP)(id, SEL);
+static void (*orig_ne_void_methods[64])(id, SEL);
+static char gNEProbeMethodNames[64][256];
+static int gNEProbeCount = 0;
 
-static void (*orig_encode_object_forKey)(id self, SEL _cmd, id object, NSString *key);
-static void hook_encode_object_forKey(id self, SEL _cmd, id object, NSString *key)
+static void ne_probe_trampoline_log(id self, SEL cmd, ...)
 {
-	if (key) {
-		NSString *objDesc = @"(nil)";
-		if (object) {
-			if ([object isKindOfClass:[NSDictionary class]]) {
-				NSDictionary *dict = (NSDictionary *)object;
-				// Log first few keys of the dict to identify bundle-ID style keys
-				NSArray *sampleKeys = [dict.allKeys subarrayWithRange:NSMakeRange(0, MIN(5u, dict.count))];
-				objDesc = [NSString stringWithFormat:@"NSDictionary(%lu entries, sample keys: %@)",
-				           (unsigned long)dict.count, sampleKeys];
-
-				// Check if any key looks like a bundle ID and might be a JB app
-				for (NSString *k in dict) {
-					if ([k containsString:@"."] && isJBBundleID(k)) {
-						NE_LOG("  ** FOUND JB bundleID as dict key in encodeObject:forKey:'%s' -> bundleID='%s'",
-						       key.UTF8String, k.UTF8String);
-					}
-				}
-			} else {
-				objDesc = [NSString stringWithFormat:@"%@", [object class]];
-			}
-		}
-		NE_LOG("NSKeyedArchiver encodeObject:forKey: '%s' obj=%s",
-		       key.UTF8String, objDesc.UTF8String);
-	}
-	orig_encode_object_forKey(self, _cmd, object, key);
+	NE_LOG("PROBE CALL: [%s %s]", object_getClassName(self), sel_getName(cmd));
 }
 
-// Also hook encodeObject: (no key, for collections)
-static void (*orig_encode_object)(id self, SEL _cmd, id object);
-static void hook_encode_object(id self, SEL _cmd, id object)
+// Hook all instance methods of a class whose name matches any of the filter words.
+static void probeClassMethods(Class cls, const char *className)
 {
-	// Only log dicts that look like they could contain bundle IDs
-	if ([object isKindOfClass:[NSDictionary class]]) {
-		NSDictionary *dict = (NSDictionary *)object;
-		for (NSString *k in dict) {
-			if ([k containsString:@"."] && isJBBundleID(k)) {
-				NE_LOG("NSKeyedArchiver encodeObject:(no-key) NSDictionary has JB bundleID key='%s'",
-				       k.UTF8String);
-				break;
-			}
+	if (!cls) return;
+	unsigned int methodCount = 0;
+	Method *methods = class_copyMethodList(cls, &methodCount);
+	NE_LOG("PROBE: scanning class %s, found %u methods", className, methodCount);
+	for (unsigned int i = 0; i < methodCount; i++) {
+		const char *name = sel_getName(method_getName(methods[i]));
+		// Filter for methods that are likely related to saving/loading/updating
+		if (strstr(name, "save") || strstr(name, "Save") ||
+		    strstr(name, "write") || strstr(name, "Write") ||
+		    strstr(name, "store") || strstr(name, "Store") ||
+		    strstr(name, "commit") || strstr(name, "Commit") ||
+		    strstr(name, "persist") || strstr(name, "Persist") ||
+		    strstr(name, "update") || strstr(name, "Update") ||
+		    strstr(name, "sync") || strstr(name, "Sync") ||
+		    strstr(name, "load") || strstr(name, "Load") ||
+		    strstr(name, "read") || strstr(name, "Read") ||
+		    strstr(name, "fetch") || strstr(name, "Fetch") ||
+		    strstr(name, "encode") || strstr(name, "decode") ||
+		    strstr(name, "Rule") || strstr(name, "rule") ||
+		    strstr(name, "Config") || strstr(name, "config") ||
+		    strstr(name, "cellular") || strstr(name, "Cellular") ||
+		    strstr(name, "wifi") || strstr(name, "Wifi") ||
+		    strstr(name, "network") || strstr(name, "Network") ||
+		    strstr(name, "path") || strstr(name, "Path")
+		) {
+			NE_LOG("PROBE: will hook [%s %s]", className, name);
 		}
 	}
-	orig_encode_object(self, _cmd, object);
-}
-
-// -- NSKeyedUnarchiver hooks --
-
-static id (*orig_decode_object_forKey)(id self, SEL _cmd, NSString *key);
-static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
-{
-	id result = orig_decode_object_forKey(self, _cmd, key);
-
-	if (key) {
-		NSString *resultDesc = @"(nil)";
-		if (result) {
-			if ([result isKindOfClass:[NSDictionary class]]) {
-				NSDictionary *dict = (NSDictionary *)result;
-				NSArray *sampleKeys = [dict.allKeys subarrayWithRange:NSMakeRange(0, MIN(5u, dict.count))];
-				resultDesc = [NSString stringWithFormat:@"NSDictionary(%lu entries, sample keys: %@)",
-				              (unsigned long)dict.count, sampleKeys];
-
-				for (NSString *k in dict) {
-					if ([k containsString:@"."] && isJBBundleID(k)) {
-						NE_LOG("  ** FOUND JB bundleID as dict key in decodeObjectForKey:'%s' -> bundleID='%s'",
-						       key.UTF8String, k.UTF8String);
-					}
-				}
-			} else {
-				resultDesc = [NSString stringWithFormat:@"%@", [result class]];
-			}
-		}
-		NE_LOG("NSKeyedUnarchiver decodeObjectForKey: '%s' -> %s",
-		       key.UTF8String, resultDesc.UTF8String);
-	}
-
-	return result;
+	free(methods);
 }
 
 // ============================================================
-// NSData file I/O hooks (backup layer: detect NE plist writes
-// and log what bundle IDs appear in $objects array)
+// NSKeyedArchiver/UnArchiver route probes:
+// Only log encode/decode of the keys we care about
+// (config-aggregate-rules, Rules, PathController).
 // ============================================================
-
-static NSString *const kNEPlistName = @"com.apple.networkextension.plist";
-
-static BOOL isNEPlist(NSString *path)
-{
-	return [path hasSuffix:kNEPlistName];
-}
-
-static NSString *jbNEPlistPath(void)
-{
-	static NSString *path = nil;
-	static dispatch_once_t once;
-	dispatch_once(&once, ^{
-		path = [NSString stringWithUTF8String:
-		        JBROOT_PATH_CSTRING("/var/preferences/com.apple.networkextension.plist")];
-	});
-	return path;
-}
-
-static void ensureJBPreferencesDir(void)
-{
-	NSString *dir = [jbNEPlistPath() stringByDeletingLastPathComponent];
-	if (![[NSFileManager defaultManager] fileExistsAtPath:dir]) {
-		[[NSFileManager defaultManager] createDirectoryAtPath:dir
-		                          withIntermediateDirectories:YES
-		                                           attributes:nil
-		                                               error:nil];
-	}
-}
-
-static __thread BOOL gNEIsRouting = NO;
-
-// ============================================================
-// Objective-C Object Probes for NEConfiguration / NEPathController
-// ============================================================
-
-// Forward declarations for Private Framework classes
-@interface NEPathRule : NSObject
-@property (retain) NSString *matchSigningIdentifier;
-@property NSInteger cellularBehavior;
-@property NSInteger wifiBehavior;
-@end
-
-@interface NEPathController : NSObject
-@property (retain) NSArray *pathRules;
-@property (retain) NSArray *payloadAppRules;
-@end
-
-@interface NEConfiguration : NSObject
-@property (readonly) NEPathController *pathController;
-@property (retain) NSString *identifier;
-@property (retain) NSString *name;
-@end
-
 
 static void (*orig_encode_object_forKey)(id self, SEL _cmd, id obj, NSString *key);
 static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 {
 	if ([key isEqualToString:@"config-aggregate-rules"] ||
 	    [key isEqualToString:@"Rules"] ||
-	    [key isEqualToString:@"PayloadAppRules"]) {
+	    [key isEqualToString:@"PayloadAppRules"] ||
+	    [key isEqualToString:@"PathController"]) {
 
 		NE_LOG("PROBE ENCODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
 
 		if ([obj isKindOfClass:[NSArray class]]) {
 			NSArray *arr = (NSArray *)obj;
 			NE_LOG("PROBE ENCODE: array count=%lu", (unsigned long)arr.count);
-			int jbCount = 0;
-			int sysCount = 0;
+			int jbCount = 0, sysCount = 0;
 			for (id rule in arr) {
 				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
 					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
 					if (bid) {
-						if (isJBBundleID(bid)) {
-							jbCount++;
-						} else {
-							sysCount++;
-						}
+						if (isJBBundleID(bid)) jbCount++;
+						else sysCount++;
 					}
 				}
+				// Log ALL property names on the first few rule objects
+				// so we know exactly what properties are available
+				static int logged = 0;
+				if (logged < 3) {
+					logged++;
+					unsigned int propCount = 0;
+					objc_property_t *props = class_copyPropertyList(object_getClass(rule), &propCount);
+					NSMutableString *propNames = [NSMutableString string];
+					for (unsigned int p = 0; p < propCount; p++) {
+						if (p) [propNames appendString:@", "];
+						[propNames appendString:@(property_getName(props[p]))];
+					}
+					free(props);
+					NE_LOG("PROBE ENCODE: rule[%d] class=%s props=[%s]",
+					       logged, object_getClassName(rule), propNames.UTF8String);
+				}
 			}
-			NE_LOG("PROBE ENCODE: array analysis -> JB rules: %d, System rules: %d", jbCount, sysCount);
+			NE_LOG("PROBE ENCODE: JB rules=%d, System rules=%d", jbCount, sysCount);
 		}
 	}
-
-	if ([obj isKindOfClass:NSClassFromString(@"NEConfiguration")]) {
-		NE_LOG("PROBE ENCODE: Found NEConfiguration");
-	}
-	if ([obj isKindOfClass:NSClassFromString(@"NEPathController")]) {
-		NE_LOG("PROBE ENCODE: Found NEPathController");
-	}
-
 	orig_encode_object_forKey(self, _cmd, obj, key);
 }
-
 
 static id (*orig_decode_object_forKey)(id self, SEL _cmd, NSString *key);
 static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
@@ -263,41 +174,47 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 
 	if (obj && ([key isEqualToString:@"config-aggregate-rules"] ||
 	            [key isEqualToString:@"Rules"] ||
-	            [key isEqualToString:@"PayloadAppRules"])) {
+	            [key isEqualToString:@"PayloadAppRules"] ||
+	            [key isEqualToString:@"PathController"])) {
 
 		NE_LOG("PROBE DECODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
 
 		if ([obj isKindOfClass:[NSArray class]]) {
 			NSArray *arr = (NSArray *)obj;
 			NE_LOG("PROBE DECODE: array count=%lu", (unsigned long)arr.count);
-			int jbCount = 0;
-			int sysCount = 0;
+			int jbCount = 0, sysCount = 0;
 			for (id rule in arr) {
 				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
 					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
 					if (bid) {
-						if (isJBBundleID(bid)) {
-							jbCount++;
-						} else {
-							sysCount++;
-						}
+						NE_LOG("PROBE DECODE: rule SigningIdentifier='%s' isJB=%d",
+						       bid.UTF8String, isJBBundleID(bid) ? 1 : 0);
+						if (isJBBundleID(bid)) jbCount++;
+						else sysCount++;
 					}
 				}
 			}
-			NE_LOG("PROBE DECODE: array analysis -> JB rules: %d, System rules: %d", jbCount, sysCount);
+			NE_LOG("PROBE DECODE: JB rules=%d, System rules=%d", jbCount, sysCount);
 		}
 	}
 
 	return obj;
 }
 
-
 // ============================================================
 void nehelperInit(void)
 {
 	NE_LOG("nehelperInit() called in process: %s (pid=%d)", getprogname(), getpid());
 
-	// -- NSKeyedArchiver object probes --
+	// Scan NEPathController and NEConfiguration methods at runtime
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+	               dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+		probeClassMethods(NSClassFromString(@"NEPathController"), "NEPathController");
+		probeClassMethods(NSClassFromString(@"NEConfiguration"), "NEConfiguration");
+		probeClassMethods(NSClassFromString(@"NEPathRule"), "NEPathRule");
+	});
+
+	// -- NSKeyedArchiver focused probes --
 	Class archiverClass = objc_getClass("NSKeyedArchiver");
 	if (archiverClass) {
 		MSHookMessageEx(archiverClass,
@@ -307,7 +224,7 @@ void nehelperInit(void)
 		NE_LOG("nehelperInit: NSKeyedArchiver probe installed");
 	}
 
-	// -- NSKeyedUnarchiver object probes --
+	// -- NSKeyedUnarchiver focused probes --
 	Class unarchiverClass = objc_getClass("NSKeyedUnarchiver");
 	if (unarchiverClass) {
 		MSHookMessageEx(unarchiverClass,
@@ -317,5 +234,5 @@ void nehelperInit(void)
 		NE_LOG("nehelperInit: NSKeyedUnarchiver probe installed");
 	}
 
-	NE_LOG("nehelperInit: Objective-C object probes installed");
+	NE_LOG("nehelperInit: probes installed, scan will run after 0.5s");
 }
