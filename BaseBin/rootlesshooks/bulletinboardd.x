@@ -372,6 +372,7 @@ void bulletinboarddInit(void)
 	ensureJBBulletinBoardDir();
 
 	// Hook NSData -writeToFile:atomically: for write interception
+	/*
 	MSHookMessageEx(
 		objc_getClass("NSData"),
 		@selector(writeToFile:atomically:),
@@ -386,6 +387,7 @@ void bulletinboarddInit(void)
 		(IMP)hook_NSData_writeToFile_options_error,
 		(IMP *)&orig_NSData_writeToFile_options_error
 	);
+	*/
 
 	// Diagnostic Hooks
 	BB_LOG("bulletinboarddInit: Deploying diagnostic read hooks...");

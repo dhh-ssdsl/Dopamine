@@ -237,8 +237,9 @@ static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 			gIsRoutingNE = NO;
 		}
 
-		// Encode only system rules into the system config
-		orig_encode_object_forKey(self, _cmd, systemRules, key);
+		// Encode ALL rules (system + JB) into the system config so they actually take effect.
+		// The original logic threw away the JB rules here, causing the system to lose them.
+		orig_encode_object_forKey(self, _cmd, allRules, key);
 		return;
 	}
 
