@@ -73,9 +73,7 @@ static BOOL isJBBundleID(NSString *bundleID)
 // ============================================================
 
 // Track whether we are in an NE-related archiving context
-// (nehelper archives several things; we want to focus on networkextension.plist)
 static __thread BOOL gInNEArchive = NO;
-static __thread int  gNEArchiveDepth = 0;
 
 // -- NSKeyedArchiver hooks --
 
