@@ -240,6 +240,7 @@ static void performInjectOnWrite(NSData *data, NSString *path,
 }
 
 static BOOL (*orig_NSData_writeToFile_atomically)(NSData *self, SEL _cmd, NSString *path, BOOL atomically);
+static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString *path, BOOL atomically) __attribute__((used));
 static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString *path, BOOL atomically)
 {
 	if (gIsRouting || !path) {
@@ -261,6 +262,7 @@ static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString 
 
 // Hook -writeToFile:options:error: (modern API, used on iOS 15/16)
 static BOOL (*orig_NSData_writeToFile_options_error)(NSData *self, SEL _cmd, NSString *path, NSDataWritingOptions options, NSError **error);
+static BOOL hook_NSData_writeToFile_options_error(NSData *self, SEL _cmd, NSString *path, NSDataWritingOptions options, NSError **error) __attribute__((used));
 static BOOL hook_NSData_writeToFile_options_error(NSData *self, SEL _cmd, NSString *path, NSDataWritingOptions options, NSError **error)
 {
 	if (gIsRouting || !path) {
