@@ -58,14 +58,11 @@ static BOOL isJBBundleID(NSString *bundleID)
 		NSString *bundlePath = bundleURL.path;
 		if (bundlePath.length) {
 			BOOL result = [bundlePath hasPrefix:jbRootPrefix()];
-			BB_LOG("isJBBundleID(%s): bundlePath=%s -> %s",
-				   bundleID.UTF8String, bundlePath.UTF8String, result ? "JB" : "system");
 			return result;
 		}
 	}
 
 	// Fallback: check if <jbroot>/Applications/<*.app>/Info.plist contains this bundle ID
-	BB_LOG("isJBBundleID(%s): LSApplicationProxy unavailable or no bundlePath, using /Applications fallback", bundleID.UTF8String);
 	NSString *jbAppsPath = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")];
 	NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
 	for (NSString *item in contents) {
@@ -73,11 +70,9 @@ static BOOL isJBBundleID(NSString *bundleID)
 		NSString *appPath = [jbAppsPath stringByAppendingPathComponent:item];
 		NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
 		if ([info[@"CFBundleIdentifier"] isEqualToString:bundleID]) {
-			BB_LOG("isJBBundleID(%s): FOUND in /Applications fallback -> JB", bundleID.UTF8String);
 			return YES;
 		}
 	}
-	BB_LOG("isJBBundleID(%s): NOT FOUND in /Applications fallback -> system", bundleID.UTF8String);
 	return NO;
 }
 
@@ -114,191 +109,132 @@ static BOOL isClearedSectionsPlist(NSString *path)
 static void ensureJBBulletinBoardDir(void)
 {
 	NSString *dir = [jbNotificationPlistPath() stringByDeletingLastPathComponent];
-	BB_LOG("ensureJBBulletinBoardDir: path=%s", dir.UTF8String);
 	if (![[NSFileManager defaultManager] fileExistsAtPath:dir]) {
-		NSError *error = nil;
-		BOOL ok = [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error];
-		if (!ok) {
-			BB_LOG("ERROR creating BulletinBoard dir: %s", error.localizedDescription.UTF8String);
-		} else {
-			BB_LOG("Created BulletinBoard dir OK");
-		}
-	} else {
-		BB_LOG("BulletinBoard dir already exists");
+		[[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
 	}
 }
 
 // ============================================================
-// READ HOOK: When bulletinboardd reads the plist, merge JB entries in
+// INJECT-ON-WRITE HOOK: Forget about intercepting early reads.
+// When SpringBoard writes the plist, we take the data it\'s about to write
+// (which may be missing JB apps if it read before our hook or via unknown API),
+// combine it with our saved JB apps, and write the combined data to the system plist.
+// We also update our saved JB apps plist.
 // ============================================================
 
-static NSData *(*orig_NSData_dataWithContentsOfFile)(id self, SEL _cmd, NSString *path);
-static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *path)
-{
-	NSData *origData = orig_NSData_dataWithContentsOfFile(self, _cmd, path);
-
-	if (gIsRouting || !path) return origData;
-
-	if (isBulletinBoardPlist(path)) {
-		BB_LOG("READ intercepted: %s", path.UTF8String);
-		gIsRouting = YES;
-		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbNotificationPlistPath());
-		gIsRouting = NO;
-
-		if (!jbData) return origData;
-
-		NSError *error = nil;
-		NSPropertyListFormat format = 0;
-		NSMutableDictionary *merged = nil;
-
-		if (origData) {
-			merged = [[NSPropertyListSerialization propertyListWithData:origData options:NSPropertyListMutableContainersAndLeaves format:&format error:&error] mutableCopy];
-		}
-		if (!merged) {
-			merged = [NSMutableDictionary dictionary];
-			format = NSPropertyListBinaryFormat_v1_0;
-		}
-
-		// VersionedSectionInfo.plist structure:
-		// { sectionInfo = { "com.bundle.id" = {...}; }; sectionInfoVersionNumber = N; }
-		// Merge at the sectionInfo sub-dictionary level
-		NSDictionary *jbDict = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&error];
-		if ([jbDict isKindOfClass:[NSDictionary class]]) {
-			NSDictionary *jbSectionInfo = jbDict[@"sectionInfo"];
-			if ([jbSectionInfo isKindOfClass:[NSDictionary class]]) {
-				NSMutableDictionary *mergedSectionInfo = [merged[@"sectionInfo"] mutableCopy] ?: [NSMutableDictionary dictionary];
-				[mergedSectionInfo addEntriesFromDictionary:jbSectionInfo];
-				merged[@"sectionInfo"] = mergedSectionInfo;
-				BB_LOG("READ: merged %lu JB sectionInfo entries", (unsigned long)jbSectionInfo.count);
-			}
-		}
-
-		NSData *mergedData = [NSPropertyListSerialization dataWithPropertyList:merged format:format options:0 error:nil];
-		return mergedData ?: origData;
-	}
-
-	if (isClearedSectionsPlist(path)) {
-		BB_LOG("READ intercepted (ClearedSections): %s", path.UTF8String);
-		gIsRouting = YES;
-		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbClearedSectionsPath());
-		gIsRouting = NO;
-
-		if (!jbData) return origData;
-
-		NSError *error = nil;
-		NSPropertyListFormat format = 0;
-		NSMutableDictionary *merged = nil;
-
-		if (origData) {
-			merged = [[NSPropertyListSerialization propertyListWithData:origData options:NSPropertyListMutableContainersAndLeaves format:&format error:&error] mutableCopy];
-		}
-		if (!merged) {
-			merged = [NSMutableDictionary dictionary];
-			format = NSPropertyListBinaryFormat_v1_0;
-		}
-
-		// ClearedSections.plist is a flat dict of bundleID->date, merge at top level
-		NSDictionary *jbEntries = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&error];
-		if ([jbEntries isKindOfClass:[NSDictionary class]]) {
-			[merged addEntriesFromDictionary:jbEntries];
-		}
-
-		NSData *mergedData = [NSPropertyListSerialization dataWithPropertyList:merged format:format options:0 error:nil];
-		return mergedData ?: origData;
-	}
-
-	return origData;
-}
-
-// ============================================================
-// WRITE HOOK: When SpringBoard writes the plist, split JB entries out
-// Shared helper: split data into system/JB parts and write both
-// ============================================================
-
-static void performSplitWrite(NSData *data, NSString *path,
-							  BOOL (^writeSystem)(NSData *d, NSString *p),
-							  BOOL (^writeJB)(NSData *d, NSString *p))
+static void performInjectOnWrite(NSData *data, NSString *path,
+							  BOOL (^writeOriginal)(NSData *d, NSString *p))
 {
 	NSError *error = nil;
 	NSPropertyListFormat format = 0;
 	NSDictionary *fullDict = [NSPropertyListSerialization propertyListWithData:data options:0 format:&format error:&error];
+	
 	if (![fullDict isKindOfClass:[NSDictionary class]]) {
-		BB_LOG("performSplitWrite: failed to parse plist, writing to system path as-is");
-		writeSystem(data, path);
+		BB_LOG("performInjectOnWrite: failed to parse plist, writing as-is");
+		writeOriginal(data, path);
 		return;
 	}
 
-	// VersionedSectionInfo.plist structure:
-	// { sectionInfo = { "com.bundle.id" = {...}; }; sectionInfoVersionNumber = N; }
-	// Bundle IDs are NESTED inside the sectionInfo sub-dictionary, not at the top level.
-	// We must split at the sectionInfo sub-dict level.
 	if (isBulletinBoardPlist(path)) {
-		NSDictionary *sectionInfoDict = fullDict[@"sectionInfo"];
-		if (![sectionInfoDict isKindOfClass:[NSDictionary class]]) {
-			// No sectionInfo key — write as-is to system
-			BB_LOG("performSplitWrite: no sectionInfo key, writing as-is");
-			writeSystem(data, path);
+		NSDictionary *sbSectionInfo = fullDict[@"sectionInfo"];
+		if (![sbSectionInfo isKindOfClass:[NSDictionary class]]) {
+			writeOriginal(data, path);
 			return;
 		}
 
-		NSMutableDictionary *systemSectionInfo = [NSMutableDictionary dictionary];
+		NSMutableDictionary *mergedSectionInfo = [sbSectionInfo mutableCopy];
 		NSMutableDictionary *jbSectionInfo = [NSMutableDictionary dictionary];
 
-		for (NSString *bundleID in sectionInfoDict) {
+		// 1. Separate current JB entries from SB's save attempt
+		for (NSString *bundleID in sbSectionInfo) {
 			if (isJBBundleID(bundleID)) {
-				jbSectionInfo[bundleID] = sectionInfoDict[bundleID];
-			} else {
-				systemSectionInfo[bundleID] = sectionInfoDict[bundleID];
+				jbSectionInfo[bundleID] = sbSectionInfo[bundleID];
 			}
 		}
 
-		BB_LOG("performSplitWrite: %lu system sectionInfo entries, %lu JB sectionInfo entries",
-			   (unsigned long)systemSectionInfo.count, (unsigned long)jbSectionInfo.count);
+		// 2. Load previous JB entries from the backup file
+		NSData *savedJBData = [NSData dataWithContentsOfFile:jbNotificationPlistPath()];
+		if (savedJBData) {
+			NSDictionary *savedJBDict = [NSPropertyListSerialization propertyListWithData:savedJBData options:0 format:nil error:nil];
+			if ([savedJBDict isKindOfClass:[NSDictionary class]]) {
+				NSDictionary *savedJBSectionInfo = savedJBDict[@"sectionInfo"];
+				if ([savedJBSectionInfo isKindOfClass:[NSDictionary class]]) {
+					// 3. For any JB apps in the backup that aren't in the current save attempt, merge them in.
+					for (NSString *bundleID in savedJBSectionInfo) {
+						if (!jbSectionInfo[bundleID]) {
+							jbSectionInfo[bundleID] = savedJBSectionInfo[bundleID]; // Keep our backup copy
+							mergedSectionInfo[bundleID] = savedJBSectionInfo[bundleID]; // Inject back into system save
+						}
+					}
+				}
+			}
+		}
 
-		// Build system plist: all top-level keys intact, but sectionInfo only has system entries
-		NSMutableDictionary *systemDict = [fullDict mutableCopy];
-		systemDict[@"sectionInfo"] = systemSectionInfo;
-		NSData *systemData = [NSPropertyListSerialization dataWithPropertyList:systemDict format:format options:0 error:nil];
-		if (systemData) writeSystem(systemData, path);
+		BB_LOG("performInjectOnWrite: writing %lu total sectionInfo entries (%lu are JB)", 
+			(unsigned long)mergedSectionInfo.count, (unsigned long)jbSectionInfo.count);
 
-		// Build JB plist: same top-level structure but sectionInfo only has JB entries
-		if (jbSectionInfo.count) {
+		// 4. Save the full merged list to the system path
+		NSMutableDictionary *finalSystemDict = [fullDict mutableCopy];
+		finalSystemDict[@"sectionInfo"] = mergedSectionInfo;
+		NSData *systemDataToWrite = [NSPropertyListSerialization dataWithPropertyList:finalSystemDict format:format options:0 error:nil];
+		if (systemDataToWrite) {
+			writeOriginal(systemDataToWrite, path);
+		} else {
+			writeOriginal(data, path);
+		}
+
+		// 5. Save the updated JB entries to our backup path
+		if (jbSectionInfo.count > 0) {
 			ensureJBBulletinBoardDir();
-			NSMutableDictionary *jbDict = [fullDict mutableCopy];
-			jbDict[@"sectionInfo"] = jbSectionInfo;
-			NSData *jbData = [NSPropertyListSerialization dataWithPropertyList:jbDict format:format options:0 error:nil];
-			if (jbData) {
-				BOOL ok = writeJB(jbData, jbNotificationPlistPath());
-				BB_LOG("performSplitWrite: JB plist write %s", ok ? "OK" : "FAILED");
+			NSMutableDictionary *finalJBDict = [fullDict mutableCopy];
+			finalJBDict[@"sectionInfo"] = jbSectionInfo;
+			NSData *jbDataToWrite = [NSPropertyListSerialization dataWithPropertyList:finalJBDict format:format options:0 error:nil];
+			if (jbDataToWrite) {
+				[jbDataToWrite writeToFile:jbNotificationPlistPath() atomically:YES];
 			}
 		}
 		return;
 	}
 
-	// ClearedSections.plist: flat dict of bundleID -> timestamp, split at top level
-	NSMutableDictionary *systemEntries = [NSMutableDictionary dictionary];
-	NSMutableDictionary *jbEntries = [NSMutableDictionary dictionary];
+	if (isClearedSectionsPlist(path)) {
+		NSMutableDictionary *mergedEntries = [(NSDictionary *)fullDict mutableCopy];
+		NSMutableDictionary *jbEntries = [NSMutableDictionary dictionary];
 
-	for (NSString *key in fullDict) {
-		if (isJBBundleID(key)) {
-			jbEntries[key] = fullDict[key];
-		} else {
-			systemEntries[key] = fullDict[key];
+		for (NSString *bundleID in fullDict) {
+			if (isJBBundleID(bundleID)) {
+				jbEntries[bundleID] = fullDict[bundleID];
+			}
 		}
-	}
 
-	BB_LOG("performSplitWrite(ClearedSections): %lu system, %lu JB",
-		   (unsigned long)systemEntries.count, (unsigned long)jbEntries.count);
+		NSData *savedJBData = [NSData dataWithContentsOfFile:jbClearedSectionsPath()];
+		if (savedJBData) {
+			NSDictionary *savedJBDict = [NSPropertyListSerialization propertyListWithData:savedJBData options:0 format:nil error:nil];
+			if ([savedJBDict isKindOfClass:[NSDictionary class]]) {
+				for (NSString *bundleID in savedJBDict) {
+					if (!jbEntries[bundleID]) {
+						jbEntries[bundleID] = savedJBDict[bundleID];
+						mergedEntries[bundleID] = savedJBDict[bundleID];
+					}
+				}
+			}
+		}
 
-	NSData *systemData = [NSPropertyListSerialization dataWithPropertyList:systemEntries format:format options:0 error:nil];
-	if (systemData) writeSystem(systemData, path);
+		BB_LOG("performInjectOnWrite(ClearedSections): writing %lu total entries (%lu are JB)", 
+			(unsigned long)mergedEntries.count, (unsigned long)jbEntries.count);
 
-	if (jbEntries.count) {
-		ensureJBBulletinBoardDir();
-		NSData *jbData = [NSPropertyListSerialization dataWithPropertyList:jbEntries format:format options:0 error:nil];
-		if (jbData) {
-			BOOL ok = writeJB(jbData, jbClearedSectionsPath());
-			BB_LOG("performSplitWrite(ClearedSections): JB write %s", ok ? "OK" : "FAILED");
+		NSData *systemDataToWrite = [NSPropertyListSerialization dataWithPropertyList:mergedEntries format:format options:0 error:nil];
+		if (systemDataToWrite) {
+			writeOriginal(systemDataToWrite, path);
+		} else {
+			writeOriginal(data, path);
+		}
+
+		if (jbEntries.count > 0) {
+			ensureJBBulletinBoardDir();
+			NSData *jbDataToWrite = [NSPropertyListSerialization dataWithPropertyList:jbEntries format:format options:0 error:nil];
+			if (jbDataToWrite) {
+				[jbDataToWrite writeToFile:jbClearedSectionsPath() atomically:YES];
+			}
 		}
 	}
 }
@@ -311,12 +247,10 @@ static BOOL hook_NSData_writeToFile_atomically(NSData *self, SEL _cmd, NSString 
 	}
 
 	if (isBulletinBoardPlist(path) || isClearedSectionsPlist(path)) {
-		BB_LOG("WRITE(atomically) intercepted: %s", path.UTF8String);
 		gIsRouting = YES;
 		__block BOOL result = YES;
-		performSplitWrite(self, path,
-			^BOOL(NSData *d, NSString *p) { result = orig_NSData_writeToFile_atomically(d, _cmd, p, atomically); return result; },
-			^BOOL(NSData *d, NSString *p) { return orig_NSData_writeToFile_atomically(d, _cmd, p, atomically); }
+		performInjectOnWrite(self, path,
+			^BOOL(NSData *d, NSString *p) { result = orig_NSData_writeToFile_atomically(d, _cmd, p, atomically); return result; }
 		);
 		gIsRouting = NO;
 		return result;
@@ -334,13 +268,11 @@ static BOOL hook_NSData_writeToFile_options_error(NSData *self, SEL _cmd, NSStri
 	}
 
 	if (isBulletinBoardPlist(path) || isClearedSectionsPlist(path)) {
-		BB_LOG("WRITE(options:error:) intercepted: %s", path.UTF8String);
 		gIsRouting = YES;
 		__block BOOL result = YES;
 		__block NSError *capturedError = nil;
-		performSplitWrite(self, path,
-			^BOOL(NSData *d, NSString *p) { result = orig_NSData_writeToFile_options_error(d, _cmd, p, options, &capturedError); return result; },
-			^BOOL(NSData *d, NSString *p) { return orig_NSData_writeToFile_options_error(d, _cmd, p, options, nil); }
+		performInjectOnWrite(self, path,
+			^BOOL(NSData *d, NSString *p) { result = orig_NSData_writeToFile_options_error(d, _cmd, p, options, &capturedError); return result; }
 		);
 		if (error) *error = capturedError;
 		gIsRouting = NO;
@@ -350,82 +282,94 @@ static BOOL hook_NSData_writeToFile_options_error(NSData *self, SEL _cmd, NSStri
 	return orig_NSData_writeToFile_options_error(self, _cmd, path, options, error);
 }
 
-// Hook +dataWithContentsOfFile:options:error: (modern read API)
-static NSData *(*orig_NSData_dataWithContentsOfFile_options_error)(id self, SEL _cmd, NSString *path, NSDataReadingOptions options, NSError **error);
-static NSData *hook_NSData_dataWithContentsOfFile_options_error(id self, SEL _cmd, NSString *path, NSDataReadingOptions options, NSError **error)
-{
-	NSData *origData = orig_NSData_dataWithContentsOfFile_options_error(self, _cmd, path, options, error);
-	if (gIsRouting || !path) return origData;
+// ============================================================
+// DIAGNOSTIC READ HOOKS: "Log Dragnet" to catch SpringBoard reads
+// ============================================================
 
-	if (isBulletinBoardPlist(path)) {
-		BB_LOG("READ(options:error:) intercepted: %s", path.UTF8String);
-		gIsRouting = YES;
-		NSData *jbData = orig_NSData_dataWithContentsOfFile_options_error(self, _cmd, jbNotificationPlistPath(), options, nil);
-		gIsRouting = NO;
-		if (!jbData) return origData;
-
-		NSError *mergeError = nil;
-		NSPropertyListFormat format = 0;
-		NSMutableDictionary *merged = origData
-			? [[NSPropertyListSerialization propertyListWithData:origData options:NSPropertyListMutableContainersAndLeaves format:&format error:&mergeError] mutableCopy]
-			: [NSMutableDictionary dictionary];
-		if (!merged) { merged = [NSMutableDictionary dictionary]; format = NSPropertyListBinaryFormat_v1_0; }
-
-		// Merge at sectionInfo sub-dictionary level
-		NSDictionary *jbDict = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&mergeError];
-		if ([jbDict isKindOfClass:[NSDictionary class]]) {
-			NSDictionary *jbSectionInfo = jbDict[@"sectionInfo"];
-			if ([jbSectionInfo isKindOfClass:[NSDictionary class]]) {
-				NSMutableDictionary *mergedSectionInfo = [merged[@"sectionInfo"] mutableCopy] ?: [NSMutableDictionary dictionary];
-				[mergedSectionInfo addEntriesFromDictionary:jbSectionInfo];
-				merged[@"sectionInfo"] = mergedSectionInfo;
-				BB_LOG("READ(options:error:): merged %lu JB sectionInfo entries, total sectionInfo now %lu",
-				       (unsigned long)jbSectionInfo.count, (unsigned long)mergedSectionInfo.count);
-			} else {
-				BB_LOG("READ(options:error:): JB plist has no sectionInfo sub-dict");
-			}
-		} else {
-			BB_LOG("READ(options:error:): failed to parse JB plist (error=%s)",
-			       mergeError.localizedDescription.UTF8String ?: "unknown");
-		}
-		NSData *mergedData = [NSPropertyListSerialization dataWithPropertyList:merged format:format options:0 error:nil];
-		return mergedData ?: origData;
+static id (*orig_NSDictionary_dictionaryWithContentsOfFile)(id self, SEL _cmd, NSString *path);
+static id hook_NSDictionary_dictionaryWithContentsOfFile(id self, SEL _cmd, NSString *path) {
+	if (path && [path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSDictionary dictionaryWithContentsOfFile:] - Path: %s", path.UTF8String);
 	}
+	return orig_NSDictionary_dictionaryWithContentsOfFile(self, _cmd, path);
+}
 
-	if (isClearedSectionsPlist(path)) {
-		BB_LOG("READ(ClearedSections options:error:) intercepted: %s", path.UTF8String);
-		gIsRouting = YES;
-		NSData *jbData = orig_NSData_dataWithContentsOfFile_options_error(self, _cmd, jbClearedSectionsPath(), options, nil);
-		gIsRouting = NO;
-		if (!jbData) return origData;
-
-		NSError *mergeError = nil;
-		NSPropertyListFormat format = 0;
-		NSMutableDictionary *merged = origData
-			? [[NSPropertyListSerialization propertyListWithData:origData options:NSPropertyListMutableContainersAndLeaves format:&format error:&mergeError] mutableCopy]
-			: [NSMutableDictionary dictionary];
-		if (!merged) { merged = [NSMutableDictionary dictionary]; format = NSPropertyListBinaryFormat_v1_0; }
-		NSDictionary *jbEntries = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&mergeError];
-		if ([jbEntries isKindOfClass:[NSDictionary class]]) [merged addEntriesFromDictionary:jbEntries];
-		NSData *mergedData = [NSPropertyListSerialization dataWithPropertyList:merged format:format options:0 error:nil];
-		return mergedData ?: origData;
+static id (*orig_NSDictionary_dictionaryWithContentsOfURL)(id self, SEL _cmd, NSURL *url);
+static id hook_NSDictionary_dictionaryWithContentsOfURL(id self, SEL _cmd, NSURL *url) {
+	if (url.path && [url.path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSDictionary dictionaryWithContentsOfURL:] - URL: %s", url.absoluteString.UTF8String);
 	}
+	return orig_NSDictionary_dictionaryWithContentsOfURL(self, _cmd, url);
+}
 
-	return origData;
+static id (*orig_NSDictionary_dictionaryWithContentsOfURLError)(id self, SEL _cmd, NSURL *url, NSError **error);
+static id hook_NSDictionary_dictionaryWithContentsOfURLError(id self, SEL _cmd, NSURL *url, NSError **error) {
+	if (url.path && [url.path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSDictionary dictionaryWithContentsOfURL:error:] - URL: %s", url.absoluteString.UTF8String);
+	}
+	return orig_NSDictionary_dictionaryWithContentsOfURLError(self, _cmd, url, error);
+}
+
+static id (*orig_NSArray_arrayWithContentsOfFile)(id self, SEL _cmd, NSString *path);
+static id hook_NSArray_arrayWithContentsOfFile(id self, SEL _cmd, NSString *path) {
+	if (path && [path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSArray arrayWithContentsOfFile:] - Path: %s", path.UTF8String);
+	}
+	return orig_NSArray_arrayWithContentsOfFile(self, _cmd, path);
+}
+
+static id (*orig_NSArray_arrayWithContentsOfURL)(id self, SEL _cmd, NSURL *url);
+static id hook_NSArray_arrayWithContentsOfURL(id self, SEL _cmd, NSURL *url) {
+	if (url.path && [url.path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSArray arrayWithContentsOfURL:] - URL: %s", url.absoluteString.UTF8String);
+	}
+	return orig_NSArray_arrayWithContentsOfURL(self, _cmd, url);
+}
+
+static id (*orig_NSArray_arrayWithContentsOfURLError)(id self, SEL _cmd, NSURL *url, NSError **error);
+static id hook_NSArray_arrayWithContentsOfURLError(id self, SEL _cmd, NSURL *url, NSError **error) {
+	if (url.path && [url.path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSArray arrayWithContentsOfURL:error:] - URL: %s", url.absoluteString.UTF8String);
+	}
+	return orig_NSArray_arrayWithContentsOfURLError(self, _cmd, url, error);
+}
+
+static id (*orig_NSData_dataWithContentsOfFile)(id self, SEL _cmd, NSString *path);
+static id hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *path) {
+	if (path && [path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSData dataWithContentsOfFile:] - Path: %s", path.UTF8String);
+	}
+	return orig_NSData_dataWithContentsOfFile(self, _cmd, path);
+}
+
+static id (*orig_NSData_dataWithContentsOfURL)(id self, SEL _cmd, NSURL *url);
+static id hook_NSData_dataWithContentsOfURL(id self, SEL _cmd, NSURL *url) {
+	if (url.path && [url.path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSData dataWithContentsOfURL:] - URL: %s", url.absoluteString.UTF8String);
+	}
+	return orig_NSData_dataWithContentsOfURL(self, _cmd, url);
+}
+
+static id (*orig_NSData_dataWithContentsOfFileOptionsError)(id self, SEL _cmd, NSString *path, NSDataReadingOptions readOptionsMask, NSError **errorPtr);
+static id hook_NSData_dataWithContentsOfFileOptionsError(id self, SEL _cmd, NSString *path, NSDataReadingOptions readOptionsMask, NSError **errorPtr) {
+	if (path && [path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSData dataWithContentsOfFile:options:error:] - Path: %s", path.UTF8String);
+	}
+	return orig_NSData_dataWithContentsOfFileOptionsError(self, _cmd, path, readOptionsMask, errorPtr);
+}
+
+static id (*orig_NSData_dataWithContentsOfURLOptionsError)(id self, SEL _cmd, NSURL *url, NSDataReadingOptions readOptionsMask, NSError **errorPtr);
+static id hook_NSData_dataWithContentsOfURLOptionsError(id self, SEL _cmd, NSURL *url, NSDataReadingOptions readOptionsMask, NSError **errorPtr) {
+	if (url.path && [url.path containsString:@"VersionedSectionInfo.plist"]) {
+		BB_LOG("[BOMBSHELL] Caught read via +[NSData dataWithContentsOfURL:options:error:] - URL: %s", url.absoluteString.UTF8String);
+	}
+	return orig_NSData_dataWithContentsOfURLOptionsError(self, _cmd, url, readOptionsMask, errorPtr);
 }
 
 void bulletinboarddInit(void)
 {
 	BB_LOG("bulletinboarddInit() called in process: %s (pid=%d)", getprogname(), getpid());
 	ensureJBBulletinBoardDir();
-
-	// Hook NSData +dataWithContentsOfFile: for read interception
-	MSHookMessageEx(
-		objc_getClass("NSData"),
-		@selector(dataWithContentsOfFile:),
-		(IMP)hook_NSData_dataWithContentsOfFile,
-		(IMP *)&orig_NSData_dataWithContentsOfFile
-	);
 
 	// Hook NSData -writeToFile:atomically: for write interception
 	MSHookMessageEx(
@@ -443,11 +387,21 @@ void bulletinboarddInit(void)
 		(IMP *)&orig_NSData_writeToFile_options_error
 	);
 
-	// Hook NSData +dataWithContentsOfFile:options:error: (modern read API)
-	MSHookMessageEx(
-		objc_getMetaClass("NSData"),
-		@selector(dataWithContentsOfFile:options:error:),
-		(IMP)hook_NSData_dataWithContentsOfFile_options_error,
-		(IMP *)&orig_NSData_dataWithContentsOfFile_options_error
-	);
+	// Diagnostic Hooks
+	BB_LOG("bulletinboarddInit: Deploying diagnostic read hooks...");
+	Class nsDictionaryClass = objc_getClass("NSDictionary");
+	MSHookMessageEx(nsDictionaryClass, @selector(dictionaryWithContentsOfFile:), (IMP)hook_NSDictionary_dictionaryWithContentsOfFile, (IMP *)&orig_NSDictionary_dictionaryWithContentsOfFile);
+	MSHookMessageEx(nsDictionaryClass, @selector(dictionaryWithContentsOfURL:), (IMP)hook_NSDictionary_dictionaryWithContentsOfURL, (IMP *)&orig_NSDictionary_dictionaryWithContentsOfURL);
+	MSHookMessageEx(nsDictionaryClass, @selector(dictionaryWithContentsOfURL:error:), (IMP)hook_NSDictionary_dictionaryWithContentsOfURLError, (IMP *)&orig_NSDictionary_dictionaryWithContentsOfURLError);
+
+	Class nsArrayClass = objc_getClass("NSArray");
+	MSHookMessageEx(nsArrayClass, @selector(arrayWithContentsOfFile:), (IMP)hook_NSArray_arrayWithContentsOfFile, (IMP *)&orig_NSArray_arrayWithContentsOfFile);
+	MSHookMessageEx(nsArrayClass, @selector(arrayWithContentsOfURL:), (IMP)hook_NSArray_arrayWithContentsOfURL, (IMP *)&orig_NSArray_arrayWithContentsOfURL);
+	MSHookMessageEx(nsArrayClass, @selector(arrayWithContentsOfURL:error:), (IMP)hook_NSArray_arrayWithContentsOfURLError, (IMP *)&orig_NSArray_arrayWithContentsOfURLError);
+
+	Class nsDataClass = objc_getClass("NSData");
+	MSHookMessageEx(nsDataClass, @selector(dataWithContentsOfFile:), (IMP)hook_NSData_dataWithContentsOfFile, (IMP *)&orig_NSData_dataWithContentsOfFile);
+	MSHookMessageEx(nsDataClass, @selector(dataWithContentsOfURL:), (IMP)hook_NSData_dataWithContentsOfURL, (IMP *)&orig_NSData_dataWithContentsOfURL);
+	MSHookMessageEx(nsDataClass, @selector(dataWithContentsOfFile:options:error:), (IMP)hook_NSData_dataWithContentsOfFileOptionsError, (IMP *)&orig_NSData_dataWithContentsOfFileOptionsError);
+	MSHookMessageEx(nsDataClass, @selector(dataWithContentsOfURL:options:error:), (IMP)hook_NSData_dataWithContentsOfURLOptionsError, (IMP *)&orig_NSData_dataWithContentsOfURLOptionsError);
 }
