@@ -173,15 +173,9 @@ static void performInjectOnWrite(NSData *data, NSString *path,
 		BB_LOG("performInjectOnWrite: writing %lu total sectionInfo entries (%lu are JB)", 
 			(unsigned long)mergedSectionInfo.count, (unsigned long)jbSectionInfo.count);
 
-		// 4. Save the full merged list to the system path
-		NSMutableDictionary *finalSystemDict = [fullDict mutableCopy];
-		finalSystemDict[@"sectionInfo"] = mergedSectionInfo;
-		NSData *systemDataToWrite = [NSPropertyListSerialization dataWithPropertyList:finalSystemDict format:format options:0 error:nil];
-		if (systemDataToWrite) {
-			writeOriginal(systemDataToWrite, path);
-		} else {
-			writeOriginal(data, path);
-		}
+		// 4. Save the ORIGINAL system dict (without JB apps) to the system path
+		// We DO NOT merge JB apps back into the system config anymore.
+		writeOriginal(data, path);
 
 		// 5. Save the updated JB entries to our backup path
 		if (jbSectionInfo.count > 0) {
@@ -222,12 +216,8 @@ static void performInjectOnWrite(NSData *data, NSString *path,
 		BB_LOG("performInjectOnWrite(ClearedSections): writing %lu total entries (%lu are JB)", 
 			(unsigned long)mergedEntries.count, (unsigned long)jbEntries.count);
 
-		NSData *systemDataToWrite = [NSPropertyListSerialization dataWithPropertyList:mergedEntries format:format options:0 error:nil];
-		if (systemDataToWrite) {
-			writeOriginal(systemDataToWrite, path);
-		} else {
-			writeOriginal(data, path);
-		}
+		// We DO NOT merge JB apps back into the system cleared sections anymore.
+		writeOriginal(data, path);
 
 		if (jbEntries.count > 0) {
 			ensureJBBulletinBoardDir();
@@ -374,7 +364,6 @@ void bulletinboarddInit(void)
 	ensureJBBulletinBoardDir();
 
 	// Hook NSData -writeToFile:atomically: for write interception
-	/*
 	MSHookMessageEx(
 		objc_getClass("NSData"),
 		@selector(writeToFile:atomically:),
@@ -389,7 +378,6 @@ void bulletinboarddInit(void)
 		(IMP)hook_NSData_writeToFile_options_error,
 		(IMP *)&orig_NSData_writeToFile_options_error
 	);
-	*/
 
 	// Diagnostic Hooks
 	BB_LOG("bulletinboarddInit: Deploying diagnostic read hooks...");
