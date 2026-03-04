@@ -99,15 +99,25 @@ static void initializeTCCRouting(sqlite3 *db)
 	int rc = sqlite3_exec(db, attachSQL, NULL, NULL, NULL);
 	TC_LOG("initializeTCCRouting: ATTACH -> rc=%d, jbTCCPath=%s", rc, jbTCCPath);
 
+	// 1. Clean up legacy persistent views/triggers from main DB to prevent schema bloat
+	sqlite3_exec(db, "DROP VIEW IF EXISTS main.jb_access_router", NULL, NULL, NULL);
+	sqlite3_exec(db, "DROP TRIGGER IF EXISTS main.jb_router_insert_main", NULL, NULL, NULL);
+	sqlite3_exec(db, "DROP TRIGGER IF EXISTS main.jb_router_insert_jb", NULL, NULL, NULL);
+	sqlite3_exec(db, "DROP TRIGGER IF EXISTS main.jb_router_update_main", NULL, NULL, NULL);
+	sqlite3_exec(db, "DROP TRIGGER IF EXISTS main.jb_router_update_jb", NULL, NULL, NULL);
+	sqlite3_exec(db, "DROP TRIGGER IF EXISTS main.jb_router_delete_main", NULL, NULL, NULL);
+	sqlite3_exec(db, "DROP TRIGGER IF EXISTS main.jb_router_delete_jb", NULL, NULL, NULL);
+
 	sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jbtcc.access AS SELECT * FROM main.access WHERE 0", NULL, NULL, NULL);
 
+	// 2. Create session-only (TEMP) view and triggers so we don't pollute TCC.db on disk
 	sqlite3_exec(db,
-		"CREATE VIEW IF NOT EXISTS jb_access_router AS "
+		"CREATE TEMP VIEW IF NOT EXISTS jb_access_router AS "
 		"SELECT * FROM main.access UNION ALL SELECT * FROM jbtcc.access",
 		NULL, NULL, NULL);
 
 	sqlite3_exec(db,
-		"CREATE TRIGGER IF NOT EXISTS jb_router_insert_main "
+		"CREATE TEMP TRIGGER IF NOT EXISTS jb_router_insert_main "
 		"INSTEAD OF INSERT ON jb_access_router "
 		"WHEN jb_is_client(NEW.client)=0 "
 		"BEGIN "
@@ -116,7 +126,7 @@ static void initializeTCCRouting(sqlite3 *db)
 		NULL, NULL, NULL);
 
 	sqlite3_exec(db,
-		"CREATE TRIGGER IF NOT EXISTS jb_router_insert_jb "
+		"CREATE TEMP TRIGGER IF NOT EXISTS jb_router_insert_jb "
 		"INSTEAD OF INSERT ON jb_access_router "
 		"WHEN jb_is_client(NEW.client)=1 "
 		"BEGIN "
@@ -125,7 +135,7 @@ static void initializeTCCRouting(sqlite3 *db)
 		NULL, NULL, NULL);
 
 	sqlite3_exec(db,
-		"CREATE TRIGGER IF NOT EXISTS jb_router_update_main "
+		"CREATE TEMP TRIGGER IF NOT EXISTS jb_router_update_main "
 		"INSTEAD OF UPDATE ON jb_access_router "
 		"WHEN jb_is_client(OLD.client)=0 "
 		"BEGIN "
@@ -136,7 +146,7 @@ static void initializeTCCRouting(sqlite3 *db)
 		NULL, NULL, NULL);
 
 	sqlite3_exec(db,
-		"CREATE TRIGGER IF NOT EXISTS jb_router_update_jb "
+		"CREATE TEMP TRIGGER IF NOT EXISTS jb_router_update_jb "
 		"INSTEAD OF UPDATE ON jb_access_router "
 		"WHEN jb_is_client(OLD.client)=1 "
 		"BEGIN "
@@ -147,7 +157,7 @@ static void initializeTCCRouting(sqlite3 *db)
 		NULL, NULL, NULL);
 
 	sqlite3_exec(db,
-		"CREATE TRIGGER IF NOT EXISTS jb_router_delete_main "
+		"CREATE TEMP TRIGGER IF NOT EXISTS jb_router_delete_main "
 		"INSTEAD OF DELETE ON jb_access_router "
 		"WHEN jb_is_client(OLD.client)=0 "
 		"BEGIN "
@@ -156,7 +166,7 @@ static void initializeTCCRouting(sqlite3 *db)
 		NULL, NULL, NULL);
 
 	sqlite3_exec(db,
-		"CREATE TRIGGER IF NOT EXISTS jb_router_delete_jb "
+		"CREATE TEMP TRIGGER IF NOT EXISTS jb_router_delete_jb "
 		"INSTEAD OF DELETE ON jb_access_router "
 		"WHEN jb_is_client(OLD.client)=1 "
 		"BEGIN "
@@ -164,7 +174,7 @@ static void initializeTCCRouting(sqlite3 *db)
 		"END;",
 		NULL, NULL, NULL);
 
-	TC_LOG("initializeTCCRouting: triggers/views created");
+	TC_LOG("initializeTCCRouting: TEMP triggers/views created, legacy ones cleaned up");
 }
 
 static NSString *rewriteSQLForRouter(NSString *sql)

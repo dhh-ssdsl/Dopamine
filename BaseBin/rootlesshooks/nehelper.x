@@ -168,33 +168,36 @@ static BOOL isNEPlist(NSString *path)
 	return [path hasSuffix:kNEPlistName];
 }
 
-static NSString *jbNEPlistPath(void)
-{
-	static NSString *path = nil;
-	static dispatch_once_t once;
-	dispatch_once(&once, ^{
-		path = [NSString stringWithUTF8String:
-		        JBROOT_PATH_CSTRING("/var/preferences/com.apple.networkextension.plist")];
-	});
-	return path;
-}
+static __thread BOOL gNEIsRouting = NO; // guards recursive read-hook calls
 
-static void ensureJBPreferencesDir(void)
-{
-	NSString *dir = [jbNEPlistPath() stringByDeletingLastPathComponent];
-	if (![[NSFileManager defaultManager] fileExistsAtPath:dir]) {
-		[[NSFileManager defaultManager] createDirectoryAtPath:dir
-		                          withIntermediateDirectories:YES
-		                                           attributes:nil
-		                                               error:nil];
-	}
-}
-
-static __thread BOOL gNEIsRouting = NO;
 
 // Scan $objects for JB bundle IDs and log them
+// Returns number of JB bundle IDs found in the plist's $objects array.
+static NSUInteger countJBBundleIDsInPlist(NSData *data)
+{
+	if (!data) return 0;
+	NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data
+	                                                                options:0
+	                                                                 format:nil
+	                                                                  error:nil];
+	NSArray *objects = plist[@"$objects"];
+	if (![objects isKindOfClass:[NSArray class]]) return 0;
+
+	NSUInteger count = 0;
+	for (id obj in objects) {
+		if (![obj isKindOfClass:[NSString class]]) continue;
+		NSString *str = (NSString *)obj;
+		if ([str hasPrefix:@"$"] || [str hasPrefix:@"NS."] || str.length > 256) continue;
+		if ([str componentsSeparatedByString:@"."].count < 3) continue;
+		if (isJBBundleID(str)) count++;
+	}
+	return count;
+}
+
+// Logs JB bundle IDs found in the plist's $objects array (diagnostic only).
 static void logNEPlistBundleIDs(NSData *data, const char *context)
 {
+	NSUInteger jbCount = countJBBundleIDsInPlist(data);
 	NSError *error = nil;
 	NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data
 	                                                                options:0
@@ -206,46 +209,36 @@ static void logNEPlistBundleIDs(NSData *data, const char *context)
 		       error.localizedDescription.UTF8String ?: "unknown");
 		return;
 	}
-
-	NSMutableArray *jbIDs = [NSMutableArray array];
-	NSMutableArray *sysIDs = [NSMutableArray array];
+	NSUInteger sysCount = 0;
 	for (id obj in objects) {
 		if (![obj isKindOfClass:[NSString class]]) continue;
 		NSString *str = (NSString *)obj;
 		if ([str hasPrefix:@"$"] || [str hasPrefix:@"NS."] || str.length > 256) continue;
-		if (![str containsString:@"."]) continue;
-		// Only log things that look like bundle IDs (reverse-domain, 2+ components)
 		NSArray *parts = [str componentsSeparatedByString:@"."];
-		if (parts.count < 2) continue;
-		if (isJBBundleID(str)) {
-			[jbIDs addObject:str];
-		} else if (parts.count >= 3) {
-			// Plausible bundle ID, not JB
-			[sysIDs addObject:str];
-		}
+		if (parts.count >= 3 && !isJBBundleID(str)) sysCount++;
 	}
-	NE_LOG("%s: $objects scan: %lu JB bundleIDs, %lu system bundleIDs",
-	       context, (unsigned long)jbIDs.count, (unsigned long)sysIDs.count);
-	for (NSString *bid in jbIDs) {
-		NE_LOG("  JB bundleID: %s", bid.UTF8String);
-	}
+	NE_LOG("%s: $objects scan: %lu JB bundleIDs, %lu plausible system bundleIDs",
+	       context, (unsigned long)jbCount, (unsigned long)sysCount);
 }
 
-static BOOL (*orig_NSData_writeToFile_options_error)(NSData *self, SEL _cmd, NSString *path, NSDataWritingOptions opts, NSError **error);
-static BOOL hook_NSData_writeToFile_options_error(NSData *self, SEL _cmd, NSString *path, NSDataWritingOptions opts, NSError **error)
-{
-	if (!gNEIsRouting && isNEPlist(path)) {
-		NE_LOG("WRITE intercepted: %s (%lu bytes)", path.UTF8String, (unsigned long)self.length);
-		logNEPlistBundleIDs(self, "WRITE");
+// NOTE: nehelper writes NE plist via CFPreferences XPC → cfprefsd → disk.
+// The actual NSData write happens inside cfprefsd, not here.
+// Write mirroring is handled in cfprefsd.x instead.
+//
+// READ: We compare the system plist and the JB mirror by JB bundle ID count.
+// If the JB mirror has MORE JB entries, it means the system plist was reset
+// after a rejailbreak (common) and the mirror still has the authoritative data.
+// In that case we return the JB mirror so nehelper uses the correct full state.
 
-		// Save JB mirror (full copy for now; will refine after key name confirmed)
-		gNEIsRouting = YES;
-		ensureJBPreferencesDir();
-		[self writeToFile:jbNEPlistPath() atomically:YES];
-		gNEIsRouting = NO;
-		NE_LOG("WRITE: JB mirror saved to %s", jbNEPlistPath().UTF8String);
-	}
-	return orig_NSData_writeToFile_options_error(self, _cmd, path, opts, error);
+static NSString *jbNEMirrorPath(void)
+{
+	static NSString *path = nil;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		path = [NSString stringWithUTF8String:
+		        JBROOT_PATH_CSTRING("/Library/Preferences/com.apple.networkextension.plist")];
+	});
+	return path;
 }
 
 static NSData *(*orig_NSData_dataWithContentsOfFile_options_error)(id self, SEL _cmd, NSString *path, NSDataReadingOptions opts, NSError **error);
@@ -254,7 +247,50 @@ static NSData *hook_NSData_dataWithContentsOfFile_options_error(id self, SEL _cm
 	NSData *data = orig_NSData_dataWithContentsOfFile_options_error(self, _cmd, path, opts, error);
 	if (!gNEIsRouting && isNEPlist(path)) {
 		NE_LOG("READ intercepted: %s (%lu bytes)", path.UTF8String, (unsigned long)data.length);
-		logNEPlistBundleIDs(data, "READ");
+		logNEPlistBundleIDs(data, "READ:system");
+
+		// Check JB mirror for additional JB entries that may be missing from the system plist
+		gNEIsRouting = YES;
+		NSData *jbData = orig_NSData_dataWithContentsOfFile_options_error(
+			self, _cmd, jbNEMirrorPath(), opts, nil);
+		gNEIsRouting = NO;
+
+		if (jbData) {
+			NSUInteger sysJBCount  = countJBBundleIDsInPlist(data);
+			NSUInteger mirrorJBCount = countJBBundleIDsInPlist(jbData);
+			NE_LOG("READ: system JB count=%lu, mirror JB count=%lu",
+			       (unsigned long)sysJBCount, (unsigned long)mirrorJBCount);
+			if (mirrorJBCount > sysJBCount) {
+				NE_LOG("READ: mirror has more JB entries → using JB mirror");
+				return jbData;
+			}
+		}
+	}
+	return data;
+}
+
+static NSData *(*orig_NSData_dataWithContentsOfFile)(id self, SEL _cmd, NSString *path);
+static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *path)
+{
+	NSData *data = orig_NSData_dataWithContentsOfFile(self, _cmd, path);
+	if (!gNEIsRouting && isNEPlist(path)) {
+		NE_LOG("READ(basic) intercepted: %s (%lu bytes)", path.UTF8String, (unsigned long)data.length);
+		logNEPlistBundleIDs(data, "READ:system(basic)");
+
+		gNEIsRouting = YES;
+		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbNEMirrorPath());
+		gNEIsRouting = NO;
+
+		if (jbData) {
+			NSUInteger sysJBCount    = countJBBundleIDsInPlist(data);
+			NSUInteger mirrorJBCount = countJBBundleIDsInPlist(jbData);
+			NE_LOG("READ(basic): system JB count=%lu, mirror JB count=%lu",
+			       (unsigned long)sysJBCount, (unsigned long)mirrorJBCount);
+			if (mirrorJBCount > sysJBCount) {
+				NE_LOG("READ(basic): mirror has more JB entries → using JB mirror");
+				return jbData;
+			}
+		}
 	}
 	return data;
 }
@@ -288,7 +324,8 @@ void nehelperInit(void)
 		NE_LOG("nehelperInit: NSKeyedUnarchiver decode hooks installed");
 	}
 
-	// -- NSData file I/O hooks (backup layer) --
+	// -- NSData file I/O hooks (read-only, diagnostic) --
+	// Write mirroring is handled in cfprefsd.x (that's where the disk write actually happens).
 	MSHookMessageEx(
 		objc_getMetaClass("NSData"),
 		@selector(dataWithContentsOfFile:options:error:),
@@ -296,10 +333,10 @@ void nehelperInit(void)
 		(IMP *)&orig_NSData_dataWithContentsOfFile_options_error
 	);
 	MSHookMessageEx(
-		objc_getClass("NSData"),
-		@selector(writeToFile:options:error:),
-		(IMP)hook_NSData_writeToFile_options_error,
-		(IMP *)&orig_NSData_writeToFile_options_error
+		objc_getMetaClass("NSData"),
+		@selector(dataWithContentsOfFile:),
+		(IMP)hook_NSData_dataWithContentsOfFile,
+		(IMP *)&orig_NSData_dataWithContentsOfFile
 	);
 
 	NE_LOG("nehelperInit: all hooks installed");
