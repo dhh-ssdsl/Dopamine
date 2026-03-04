@@ -21,7 +21,7 @@ static void _ne_log(const char *fmt, ...) {
 #define NE_LOG(fmt, ...) _ne_log(fmt, ##__VA_ARGS__)
 
 // ============================================================
-// JB App Detection
+// JB Root Path
 // ============================================================
 
 static NSString *gJBRootPrefix = nil;
@@ -36,6 +36,10 @@ static NSString *jbRootPrefix(void)
 	});
 	return gJBRootPrefix;
 }
+
+// ============================================================
+// JB App Detection
+// ============================================================
 
 static BOOL isJBBundleID(NSString *bundleID)
 {
@@ -66,88 +70,178 @@ static BOOL isJBBundleID(NSString *bundleID)
 }
 
 // ============================================================
-// Class Method Probe
-// Scans instance methods of a class and logs those matching
-// common save/load/config/network-related keywords.
+// JB Network Rules Plist Storage
+//
+// Stores JB network rules as a plain plist dictionary:
+// {
+//   "rules" = <NSData: NSKeyedArchiver-encoded NSArray of NEPathRule>
+// }
+//
+// Using NSKeyedArchiver is NOT encryption — it's the standard
+// binary serialization used by iOS itself. No custom crypto involved.
+// The file uses normal plist format readable by plutil/Xcode.
 // ============================================================
 
-static void probeClassMethods(Class cls, const char *className)
+static NSString *jbNetworkRulesPlistPath(void)
 {
-	if (!cls) return;
-	unsigned int methodCount = 0;
-	Method *methods = class_copyMethodList(cls, &methodCount);
-	NE_LOG("PROBE: scanning class %s, found %u methods", className, methodCount);
-	for (unsigned int i = 0; i < methodCount; i++) {
-		const char *name = sel_getName(method_getName(methods[i]));
-		if (strstr(name, "save")     || strstr(name, "Save")    ||
-		    strstr(name, "write")    || strstr(name, "Write")   ||
-		    strstr(name, "store")    || strstr(name, "Store")   ||
-		    strstr(name, "commit")   || strstr(name, "Commit")  ||
-		    strstr(name, "persist")  || strstr(name, "Persist") ||
-		    strstr(name, "update")   || strstr(name, "Update")  ||
-		    strstr(name, "sync")     || strstr(name, "Sync")    ||
-		    strstr(name, "load")     || strstr(name, "Load")    ||
-		    strstr(name, "read")     || strstr(name, "Read")    ||
-		    strstr(name, "fetch")    || strstr(name, "Fetch")   ||
-		    strstr(name, "encode")   || strstr(name, "decode")  ||
-		    strstr(name, "Rule")     || strstr(name, "rule")    ||
-		    strstr(name, "Config")   || strstr(name, "config")  ||
-		    strstr(name, "cellular") || strstr(name, "Cellular")||
-		    strstr(name, "wifi")     || strstr(name, "Wifi")    ||
-		    strstr(name, "network")  || strstr(name, "Network") ||
-		    strstr(name, "path")     || strstr(name, "Path")
-		) {
-			NE_LOG("PROBE: found [%s %s]", className, name);
-		}
+	static NSString *path = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		path = [NSString stringWithUTF8String:
+		        JBROOT_PATH_CSTRING("/var/mobile/Library/Preferences/.jb_ne_rules.plist")];
+	});
+	return path;
+}
+
+// Save a JB rules array to the JB plist.
+// The array items are private NEPathRule objects — we archive the whole
+// NSArray with NSKeyedArchiver (valid in nehelper's process space where
+// the private classes are already loaded) and store the resulting NSData
+// in a plain plist dictionary under the "rules" key.
+static void saveJBRules(NSArray *jbRules)
+{
+	if (!jbRules.count) {
+		// Remove the file if there are no JB rules
+		[[NSFileManager defaultManager] removeItemAtPath:jbNetworkRulesPlistPath() error:nil];
+		NE_LOG("saveJBRules: no JB rules, removed plist");
+		return;
 	}
-	free(methods);
+
+	NSData *archivedData = nil;
+	@try {
+		archivedData = [NSKeyedArchiver archivedDataWithRootObject:jbRules
+		                              requiringSecureCoding:NO
+		                                             error:nil];
+	} @catch (NSException *e) {
+		NE_LOG("saveJBRules: archive exception: %s", e.reason.UTF8String);
+		return;
+	}
+
+	if (!archivedData) {
+		NE_LOG("saveJBRules: NSKeyedArchiver failed, nil data");
+		return;
+	}
+
+	NSDictionary *plistDict = @{ @"rules": archivedData };
+	NSError *err = nil;
+	NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:plistDict
+	                                                              format:NSPropertyListXMLFormat_v1_0
+	                                                             options:0
+	                                                               error:&err];
+	if (!plistData) {
+		NE_LOG("saveJBRules: plist serialization error: %s", err.localizedDescription.UTF8String);
+		return;
+	}
+
+	BOOL ok = [plistData writeToFile:jbNetworkRulesPlistPath() atomically:YES];
+	NE_LOG("saveJBRules: wrote %lu JB rules to plist: %s", (unsigned long)jbRules.count, ok ? "OK" : "FAILED");
+}
+
+// Load previously saved JB rules from the JB plist.
+// Returns nil if the file doesn't exist or can't be read.
+static NSArray *loadJBRules(void)
+{
+	NSString *path = jbNetworkRulesPlistPath();
+	if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
+
+	NSError *err = nil;
+	NSData *plistData = [NSData dataWithContentsOfFile:path options:0 error:&err];
+	if (!plistData) {
+		NE_LOG("loadJBRules: read error: %s", err.localizedDescription.UTF8String);
+		return nil;
+	}
+
+	NSDictionary *plistDict = [NSPropertyListSerialization propertyListWithData:plistData
+	                                                                    options:0
+	                                                                     format:nil
+	                                                                      error:&err];
+	if (![plistDict isKindOfClass:[NSDictionary class]]) {
+		NE_LOG("loadJBRules: plist parse error");
+		return nil;
+	}
+
+	NSData *archivedData = plistDict[@"rules"];
+	if (![archivedData isKindOfClass:[NSData class]]) {
+		NE_LOG("loadJBRules: no 'rules' data key");
+		return nil;
+	}
+
+	NSArray *rules = nil;
+	@try {
+		// Must disable requiresSecureCoding because NEPathRule is a private class
+		// not registered for secure coding. We authored this data ourselves, so it's safe.
+		NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:archivedData error:&err];
+		if (unarchiver) {
+			unarchiver.requiresSecureCoding = NO;
+			rules = [unarchiver decodeObjectForKey:NSKeyedArchiveRootObjectKey];
+			[unarchiver finishDecoding];
+		}
+	} @catch (NSException *e) {
+		NE_LOG("loadJBRules: unarchive exception: %s", e.reason.UTF8String);
+
+		return nil;
+	}
+
+	if (![rules isKindOfClass:[NSArray class]]) {
+		NE_LOG("loadJBRules: unarchived object is not NSArray");
+		return nil;
+	}
+
+	NE_LOG("loadJBRules: loaded %lu JB rules from plist", (unsigned long)rules.count);
+	return rules;
 }
 
 // ============================================================
 // NSKeyedArchiver / NSKeyedUnarchiver Hooks
-// Monitors encode/decode for VPN config-related keys.
 // ============================================================
+
+// Thread-local re-entrancy guard (prevents recursive hook calls when
+// saveJBRules/loadJBRules internally call NSKeyedArchiver/Unarchiver)
+static __thread BOOL gIsRoutingNE;
 
 static void (*orig_encode_object_forKey)(id self, SEL _cmd, id obj, NSString *key);
 static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 {
-	if ([key isEqualToString:@"config-aggregate-rules"] ||
-	    [key isEqualToString:@"Rules"]                  ||
-	    [key isEqualToString:@"PayloadAppRules"]        ||
-	    [key isEqualToString:@"PathController"]) {
+	// Only intercept the final "config-aggregate-rules" key — this is the key
+	// that nehelper uses when writing the consolidated config to disk.
+	// We split out JB rules and save them separately; only system rules continue.
+	if (!gIsRoutingNE &&
+	    [key isEqualToString:@"config-aggregate-rules"] &&
+	    [obj isKindOfClass:[NSArray class]])
+	{
+		NSArray *allRules = (NSArray *)obj;
+		NSMutableArray *systemRules = [NSMutableArray array];
+		NSMutableArray *jbRules     = [NSMutableArray array];
 
-		NE_LOG("PROBE ENCODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
-
-		if ([obj isKindOfClass:[NSArray class]]) {
-			NSArray *arr = (NSArray *)obj;
-			NE_LOG("PROBE ENCODE: array count=%lu", (unsigned long)arr.count);
-			int jbCount = 0, sysCount = 0;
-			static int logged = 0;
-			for (id rule in arr) {
-				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
-					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
-					if (bid) {
-						if (isJBBundleID(bid)) jbCount++;
-						else sysCount++;
-					}
-				}
-				if (logged < 3) {
-					logged++;
-					unsigned int propCount = 0;
-					objc_property_t *props = class_copyPropertyList(object_getClass(rule), &propCount);
-					NSMutableString *propNames = [NSMutableString string];
-					for (unsigned int p = 0; p < propCount; p++) {
-						if (p) [propNames appendString:@", "];
-						[propNames appendString:@(property_getName(props[p]))];
-					}
-					free(props);
-					NE_LOG("PROBE ENCODE: rule[%d] class=%s props=[%s]",
-					       logged, object_getClassName(rule), propNames.UTF8String);
-				}
+		for (id rule in allRules) {
+			NSString *bid = nil;
+			if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
+				bid = [rule valueForKey:@"matchSigningIdentifier"];
 			}
-			NE_LOG("PROBE ENCODE: JB rules=%d, System rules=%d", jbCount, sysCount);
+			if (bid && isJBBundleID(bid)) {
+				[jbRules addObject:rule];
+			} else {
+				[systemRules addObject:rule];
+			}
 		}
+
+		NE_LOG("ENCODE config-aggregate-rules: total=%lu, JB=%lu, system=%lu",
+		       (unsigned long)allRules.count,
+		       (unsigned long)jbRules.count,
+		       (unsigned long)systemRules.count);
+
+		// Persist JB rules to the JB plist (replaces any previous snapshot)
+		if (jbRules.count) {
+			gIsRoutingNE = YES;
+			saveJBRules(jbRules);
+			gIsRoutingNE = NO;
+		}
+
+		// Encode only system rules into the system config
+		orig_encode_object_forKey(self, _cmd, systemRules, key);
+		return;
 	}
+
 	orig_encode_object_forKey(self, _cmd, obj, key);
 }
 
@@ -156,29 +250,28 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 {
 	id obj = orig_decode_object_forKey(self, _cmd, key);
 
-	if (obj && ([key isEqualToString:@"config-aggregate-rules"] ||
-	            [key isEqualToString:@"Rules"]                  ||
-	            [key isEqualToString:@"PayloadAppRules"]        ||
-	            [key isEqualToString:@"PathController"])) {
+	// Intercept Rules and config-aggregate-rules on decode:
+	// merge in any JB rules that were saved separately.
+	if (!gIsRoutingNE &&
+	    ([key isEqualToString:@"Rules"] || [key isEqualToString:@"config-aggregate-rules"]) &&
+	    [obj isKindOfClass:[NSArray class]])
+	{
+		gIsRoutingNE = YES;
+		NSArray *jbRules = loadJBRules();
+		gIsRoutingNE = NO;
 
-		NE_LOG("PROBE DECODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
-
-		if ([obj isKindOfClass:[NSArray class]]) {
-			NSArray *arr = (NSArray *)obj;
-			NE_LOG("PROBE DECODE: array count=%lu", (unsigned long)arr.count);
-			int jbCount = 0, sysCount = 0;
-			for (id rule in arr) {
-				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
-					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
-					if (bid) {
-						NE_LOG("PROBE DECODE: rule SigningIdentifier='%s' isJB=%d",
-						       bid.UTF8String, isJBBundleID(bid) ? 1 : 0);
-						if (isJBBundleID(bid)) jbCount++;
-						else sysCount++;
-					}
-				}
-			}
-			NE_LOG("PROBE DECODE: JB rules=%d, System rules=%d", jbCount, sysCount);
+		if (jbRules.count) {
+			NSMutableArray *merged = [obj mutableCopy];
+			[merged addObjectsFromArray:jbRules];
+			NE_LOG("DECODE %s: system=%lu + JB=%lu = total=%lu",
+			       key.UTF8String,
+			       (unsigned long)((NSArray *)obj).count,
+			       (unsigned long)jbRules.count,
+			       (unsigned long)merged.count);
+			return [merged copy];
+		} else {
+			NE_LOG("DECODE %s: no JB rules to merge, total=%lu",
+			       key.UTF8String, (unsigned long)((NSArray *)obj).count);
 		}
 	}
 
@@ -193,33 +286,30 @@ void nehelperInit(void)
 {
 	NE_LOG("nehelperInit() called in process: %s (pid=%d)", getprogname(), getpid());
 
-	// Delayed class method scan (wait for NE classes to initialize)
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-	               dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-		probeClassMethods(NSClassFromString(@"NEPathController"), "NEPathController");
-		probeClassMethods(NSClassFromString(@"NEConfiguration"),  "NEConfiguration");
-		probeClassMethods(NSClassFromString(@"NEPathRule"),        "NEPathRule");
-	});
-
-	// Hook NSKeyedArchiver
+	// Hook NSKeyedArchiver -encodeObject:forKey:
 	Class archiverClass = objc_getClass("NSKeyedArchiver");
 	if (archiverClass) {
 		MSHookMessageEx(archiverClass,
 		    @selector(encodeObject:forKey:),
 		    (IMP)hook_encode_object_forKey,
 		    (IMP *)&orig_encode_object_forKey);
-		NE_LOG("nehelperInit: NSKeyedArchiver probe installed");
+		NE_LOG("nehelperInit: NSKeyedArchiver hook installed");
+	} else {
+		NE_LOG("nehelperInit: WARNING - NSKeyedArchiver class not found");
 	}
 
-	// Hook NSKeyedUnarchiver
+	// Hook NSKeyedUnarchiver -decodeObjectForKey:
 	Class unarchiverClass = objc_getClass("NSKeyedUnarchiver");
 	if (unarchiverClass) {
 		MSHookMessageEx(unarchiverClass,
 		    @selector(decodeObjectForKey:),
 		    (IMP)hook_decode_object_forKey,
 		    (IMP *)&orig_decode_object_forKey);
-		NE_LOG("nehelperInit: NSKeyedUnarchiver probe installed");
+		NE_LOG("nehelperInit: NSKeyedUnarchiver hook installed");
+	} else {
+		NE_LOG("nehelperInit: WARNING - NSKeyedUnarchiver class not found");
 	}
 
-	NE_LOG("nehelperInit: all probes installed");
+	NE_LOG("nehelperInit: all hooks installed. JB rules plist: %s",
+	       jbNetworkRulesPlistPath().UTF8String);
 }
