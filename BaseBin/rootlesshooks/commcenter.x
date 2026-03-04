@@ -77,13 +77,29 @@ static void initializeCellularRouting(sqlite3 *db)
 	const char *jbCellularDir = JBROOT_PATH_CSTRING("/var/wireless/Library/Databases");
 	NSString *cellularDir = [NSString stringWithUTF8String:jbCellularDir];
 	if (![[NSFileManager defaultManager] fileExistsAtPath:cellularDir]) {
-		[[NSFileManager defaultManager] createDirectoryAtPath:cellularDir withIntermediateDirectories:YES attributes:nil error:nil];
+		NSError *mkdirError = nil;
+		BOOL ok = [[NSFileManager defaultManager] createDirectoryAtPath:cellularDir withIntermediateDirectories:YES attributes:nil error:&mkdirError];
+		if (!ok) {
+			CC_LOG("ERROR creating cellular dir %s: %s", jbCellularDir,
+				   mkdirError.localizedDescription.UTF8String ?: "unknown");
+		} else {
+			CC_LOG("Created cellular dir: %s", jbCellularDir);
+		}
+	} else {
+		CC_LOG("Cellular dir already exists: %s", jbCellularDir);
 	}
 
 	const char *jbCellularPath = JBROOT_PATH_CSTRING("/var/wireless/Library/Databases/.jb_cellular.db");
 	char attachSQL[1024];
 	snprintf(attachSQL, sizeof(attachSQL), "ATTACH DATABASE '%s' AS jbcellular", jbCellularPath);
-	sqlite3_exec(db, attachSQL, NULL, NULL, NULL);
+	char *attachErr = NULL;
+	int attachRc = sqlite3_exec(db, attachSQL, NULL, NULL, &attachErr);
+	if (attachRc != SQLITE_OK) {
+		CC_LOG("ERROR: ATTACH DATABASE failed (rc=%d): %s", attachRc, attachErr ?: "(null)");
+		sqlite3_free(attachErr);
+		return; // No point setting up views/triggers if attach failed
+	}
+	CC_LOG("ATTACH DATABASE jbcellular OK: %s", jbCellularPath);
 
 	// Create bundle_info table in jbcellular if not exists
 	sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jbcellular.bundle_info AS SELECT * FROM main.bundle_info WHERE 0", NULL, NULL, NULL);

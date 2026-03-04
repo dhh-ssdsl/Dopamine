@@ -20,7 +20,7 @@ static NSString *kClearedSectionsPath = @"/var/mobile/Library/BulletinBoard/Clea
 
 static NSSet<NSString *> *gJailbreakBundleIDs = nil;
 static time_t gLastBundleRefresh = 0;
-static BOOL gIsRouting = NO; // Prevent recursive hooks
+static __thread BOOL gIsRouting; // Thread-local: prevent recursive hooks per-thread
 
 static void refreshJBBundleIDs(void)
 {
@@ -180,11 +180,22 @@ static void performSplitWrite(NSData *data, NSString *path,
 							  BOOL (^writeSystem)(NSData *d, NSString *p),
 							  BOOL (^writeJB)(NSData *d, NSString *p))
 {
-	refreshJBBundleIDsIfNeeded();
+	// Always force-refresh on writes (writes are rare, never use stale cache here)
+	refreshJBBundleIDs();
+
 	NSError *error = nil;
 	NSPropertyListFormat format = 0;
 	NSDictionary *fullDict = [NSPropertyListSerialization propertyListWithData:data options:0 format:&format error:&error];
-	if (![fullDict isKindOfClass:[NSDictionary class]] || !gJailbreakBundleIDs.count) {
+	if (![fullDict isKindOfClass:[NSDictionary class]]) {
+		BB_LOG("performSplitWrite: failed to parse plist, writing to system path as-is");
+		writeSystem(data, path);
+		return;
+	}
+
+	// If no JB bundle IDs are known yet (e.g. mid-boot), write system data
+	// to system path but do NOT overwrite the JB plist — leave it intact.
+	if (!gJailbreakBundleIDs.count) {
+		BB_LOG("performSplitWrite: JB bundle ID set empty, writing all to system path (JB plist preserved)");
 		writeSystem(data, path);
 		return;
 	}
@@ -199,6 +210,9 @@ static void performSplitWrite(NSData *data, NSString *path,
 		}
 	}
 
+	BB_LOG("performSplitWrite: %lu system entries, %lu JB entries",
+		   (unsigned long)systemEntries.count, (unsigned long)jbEntries.count);
+
 	NSData *systemData = [NSPropertyListSerialization dataWithPropertyList:systemEntries format:format options:0 error:nil];
 	if (systemData) writeSystem(systemData, path);
 
@@ -206,7 +220,11 @@ static void performSplitWrite(NSData *data, NSString *path,
 		ensureJBBulletinBoardDir();
 		NSString *jbPath = isBulletinBoardPlist(path) ? jbNotificationPlistPath() : jbClearedSectionsPath();
 		NSData *jbData = [NSPropertyListSerialization dataWithPropertyList:jbEntries format:format options:0 error:nil];
-		if (jbData) writeJB(jbData, jbPath);
+		if (jbData) {
+			BOOL ok = writeJB(jbData, jbPath);
+			BB_LOG("performSplitWrite: JB plist write to %s %s",
+				   jbPath.UTF8String, ok ? "OK" : "FAILED");
+		}
 	}
 }
 

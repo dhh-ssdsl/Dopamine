@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 #import <libjailbreak/libjailbreak.h>
 #import <sys/mount.h>
+#import <sys/stat.h>
+#import <pwd.h>
 #import <fcntl.h>
 #import <unistd.h>
 
@@ -172,6 +174,22 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 	}
 	else if (!strcmp(command, "startup")) {
 		protection_set_active(true);
+
+		// Ensure the JB-side directory for CommCenter cellular routing exists
+		// and is owned by _wireless. Must be done as root before CommCenter starts.
+		{
+			const char *wirelessDbDir = JBROOT_PATH("/var/wireless/Library/Databases");
+			struct stat st;
+			if (stat(wirelessDbDir, &st) != 0) {
+				[[NSFileManager defaultManager]
+					createDirectoryAtPath:[NSString stringWithUTF8String:wirelessDbDir]
+					withIntermediateDirectories:YES
+					attributes:nil
+					error:nil];
+				struct passwd *pw = getpwnam("_wireless");
+				if (pw) chown(wirelessDbDir, pw->pw_uid, pw->pw_gid);
+			}
+		}
 		char *panicMessage = NULL;
 		if (jbclient_watchdog_get_last_userspace_panic(&panicMessage) == 0) {
 			NSString *printMessage = [NSString stringWithFormat:@"Dopamine has protected you from a userspace panic by temporarily disabling tweak injection and triggering a userspace reboot instead. A log is available under Analytics in the Preferences app. You can reenable tweak injection in the Dopamine app.\n\nPanic message: \n%s", panicMessage];
