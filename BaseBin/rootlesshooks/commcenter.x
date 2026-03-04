@@ -3,6 +3,12 @@
 #import <sqlite3.h>
 #import <libroot.h>
 
+// LSApplicationProxy forward declaration (MobileCoreServices private)
+@interface LSApplicationProxy : NSObject
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
+@property (nonatomic, readonly) NSURL *bundleURL;
+@end
+
 // sqlite3_db_filename is available since SQLite 3.7.10 / iOS 6+
 // Declare it explicitly in case the SDK header is too old
 extern const char *sqlite3_db_filename(sqlite3 *db, const char *zDbName);
@@ -20,46 +26,56 @@ static void _cc_log(const char *fmt, ...) {
 #define CC_LOG(fmt, ...) _cc_log(fmt, ##__VA_ARGS__)
 
 static sqlite3 *gCellularDB = NULL;
-static NSSet<NSString *> *gJailbreakBundleIDs = nil;
-static time_t gLastBundleRefresh = 0;
 
-static int (*orig_sqlite3_open_v2)(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
-static int (*orig_sqlite3_open)(const char *filename, sqlite3 **ppDb);
-static int (*orig_sqlite3_prepare_v2)(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
-static int (*orig_sqlite3_exec)(sqlite3 *db, const char *sql, int (*callback)(void*,int,char**,char**), void *arg, char **errmsg);
+// JB root path prefix
+static NSString *gJBRootPrefix = nil;
+static dispatch_once_t gJBRootOnce;
 
-static void refreshJBBundleIDs(void)
+static NSString *jbRootPrefix(void)
 {
-	NSMutableSet *bundleIDs = [NSMutableSet set];
+	dispatch_once(&gJBRootOnce, ^{
+		gJBRootPrefix = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/")];
+		if (![gJBRootPrefix hasSuffix:@"/"])
+			gJBRootPrefix = [gJBRootPrefix stringByAppendingString:@"/"];
+	});
+	return gJBRootPrefix;
+}
+
+// Returns true if bundleID belongs to a JB-installed app.
+// Uses LSApplicationProxy to check if the app's bundle path is under the JB root.
+// Falls back to /Applications directory scan if LSApplicationProxy is unavailable.
+static bool isJailbreakBundleID(const char *bundleID)
+{
+	if (!bundleID) return false;
+	NSString *bid = [NSString stringWithUTF8String:bundleID];
+	if (!bid.length) return false;
+
+	Class LSProxy = NSClassFromString(@"LSApplicationProxy");
+	if (LSProxy) {
+		id proxy = [LSProxy applicationProxyForIdentifier:bid];
+		NSURL *bundleURL = [proxy valueForKey:@"bundleURL"];
+		NSString *bundlePath = bundleURL.path;
+		if (bundlePath.length) {
+			return [bundlePath hasPrefix:jbRootPrefix()];
+		}
+	}
+
+	// Fallback: /Applications directory scan
 	NSString *jbAppsPath = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")];
 	NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
 	for (NSString *item in contents) {
 		if (![item hasSuffix:@".app"]) continue;
 		NSString *appPath = [jbAppsPath stringByAppendingPathComponent:item];
 		NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
-		NSString *bundleID = info[@"CFBundleIdentifier"];
-		if (bundleID) {
-			[bundleIDs addObject:bundleID];
-		}
+		if ([info[@"CFBundleIdentifier"] isEqualToString:bid]) return true;
 	}
-	gJailbreakBundleIDs = [bundleIDs copy];
-	gLastBundleRefresh = time(NULL);
+	return false;
 }
 
-static void refreshJBBundleIDsIfNeeded(void)
-{
-	time_t now = time(NULL);
-	if (!gJailbreakBundleIDs || (now - gLastBundleRefresh) >= 10) {
-		refreshJBBundleIDs();
-	}
-}
-
-static bool isJailbreakBundleID(const char *bundleID)
-{
-	if (!bundleID) return false;
-	refreshJBBundleIDsIfNeeded();
-	return [gJailbreakBundleIDs containsObject:[NSString stringWithUTF8String:bundleID]];
-}
+static int (*orig_sqlite3_open_v2)(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
+static int (*orig_sqlite3_open)(const char *filename, sqlite3 **ppDb);
+static int (*orig_sqlite3_prepare_v2)(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+static int (*orig_sqlite3_exec)(sqlite3 *db, const char *sql, int (*callback)(void*,int,char**,char**), void *arg, char **errmsg);
 
 static void sqlite_jb_is_client(sqlite3_context *context, int argc, sqlite3_value **argv)
 {
@@ -278,14 +294,25 @@ static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*
 			CC_LOG("Cellular routing late-initialized via exec");
 		}
 	}
+
+	// Also rewrite SQL for exec calls (previously only prepare_v2 was rewritten)
+	if (db == gCellularDB && sql) {
+		NSString *sqlStr = [NSString stringWithUTF8String:sql];
+		if (sqlStr) {
+			NSString *rewritten = rewriteSQLForCellularRouter(sqlStr);
+			if (![rewritten isEqualToString:sqlStr]) {
+				CC_LOG("exec SQL rewritten: %.120s", rewritten.UTF8String);
+				return orig_sqlite3_exec(db, rewritten.UTF8String, callback, arg, errmsg);
+			}
+		}
+	}
+
 	return orig_sqlite3_exec(db, sql, callback, arg, errmsg);
 }
 
 void commcenterInit(void)
 {
 	CC_LOG("commcenterInit() called (pid=%d)", getpid());
-	refreshJBBundleIDs();
-	CC_LOG("Found %lu JB bundle IDs", (unsigned long)gJailbreakBundleIDs.count);
 
 	MSHookFunction(sqlite3_open, (void *)hook_sqlite3_open, (void **)&orig_sqlite3_open);
 	MSHookFunction(sqlite3_open_v2, (void *)hook_sqlite3_open_v2, (void **)&orig_sqlite3_open_v2);

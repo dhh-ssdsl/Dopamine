@@ -3,45 +3,65 @@
 #import <sqlite3.h>
 #import <libroot.h>
 
+// LSApplicationProxy forward declaration (MobileCoreServices private)
+@interface LSApplicationProxy : NSObject
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
+@property (nonatomic, readonly) NSURL *bundleURL;
+@end
+
+// sqlite3_db_filename available since SQLite 3.7.10 / iOS 6+
+extern const char *sqlite3_db_filename(sqlite3 *db, const char *zDbName);
+
 static sqlite3 *gTCCDB = NULL;
-static NSSet<NSString *> *gJailbreakBundleIDs = nil;
-static time_t gLastBundleRefresh = 0;
 
-static int (*orig_sqlite3_open_v2)(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
-static int (*orig_sqlite3_prepare_v2)(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+// JB root path prefix (e.g. /private/preboot/.../procursus/)
+static NSString *gJBRootPrefix = nil;
+static dispatch_once_t gJBRootOnce;
 
-static void refreshJBBundleIDs(void)
+static NSString *jbRootPrefix(void)
 {
-	NSMutableSet *bundleIDs = [NSMutableSet set];
+	dispatch_once(&gJBRootOnce, ^{
+		gJBRootPrefix = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/")];
+		if (![gJBRootPrefix hasSuffix:@"/"])
+			gJBRootPrefix = [gJBRootPrefix stringByAppendingString:@"/"];
+	});
+	return gJBRootPrefix;
+}
+
+// Returns true if bundleID belongs to a JB-installed app.
+// Uses LSApplicationProxy to check if the app's bundle path is under the JB root prefix.
+// Falls back to /Applications directory scan if LSApplicationProxy is unavailable.
+static bool isJailbreakBundleID(const char *bundleID)
+{
+	if (!bundleID) return false;
+	NSString *bid = [NSString stringWithUTF8String:bundleID];
+	if (!bid.length) return false;
+
+	Class LSProxy = NSClassFromString(@"LSApplicationProxy");
+	if (LSProxy) {
+		id proxy = [LSProxy applicationProxyForIdentifier:bid];
+		NSURL *bundleURL = [proxy valueForKey:@"bundleURL"];
+		NSString *bundlePath = bundleURL.path;
+		if (bundlePath.length) {
+			return [bundlePath hasPrefix:jbRootPrefix()];
+		}
+	}
+
+	// Fallback: /Applications directory scan
 	NSString *jbAppsPath = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")];
 	NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
 	for (NSString *item in contents) {
 		if (![item hasSuffix:@".app"]) continue;
 		NSString *appPath = [jbAppsPath stringByAppendingPathComponent:item];
 		NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
-		NSString *bundleID = info[@"CFBundleIdentifier"];
-		if (bundleID) {
-			[bundleIDs addObject:bundleID];
-		}
+		if ([info[@"CFBundleIdentifier"] isEqualToString:bid]) return true;
 	}
-	gJailbreakBundleIDs = [bundleIDs copy];
-	gLastBundleRefresh = time(NULL);
+	return false;
 }
 
-static void refreshJBBundleIDsIfNeeded(void)
-{
-	time_t now = time(NULL);
-	if (!gJailbreakBundleIDs || (now - gLastBundleRefresh) >= 10) {
-		refreshJBBundleIDs();
-	}
-}
-
-static bool isJailbreakBundleID(const char *bundleID)
-{
-	if (!bundleID) return false;
-	refreshJBBundleIDsIfNeeded();
-	return [gJailbreakBundleIDs containsObject:[NSString stringWithUTF8String:bundleID]];
-}
+static int (*orig_sqlite3_open_v2)(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
+static int (*orig_sqlite3_prepare_v2)(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+static int (*orig_sqlite3_exec)(sqlite3 *db, const char *sql, int (*callback)(void*,int,char**,char**), void *arg, char **errmsg);
 
 static void sqlite_jb_is_client(sqlite3_context *context, int argc, sqlite3_value **argv)
 {
@@ -49,7 +69,6 @@ static void sqlite_jb_is_client(sqlite3_context *context, int argc, sqlite3_valu
 		sqlite3_result_int(context, 0);
 		return;
 	}
-
 	const unsigned char *client = sqlite3_value_text(argv[0]);
 	sqlite3_result_int(context, isJailbreakBundleID((const char *)client) ? 1 : 0);
 }
@@ -162,21 +181,36 @@ static NSString *rewriteSQLForRouter(NSString *sql)
 	return sql;
 }
 
+static void setupTCCDB(sqlite3 *db, const char *filename)
+{
+	gTCCDB = db;
+	sqlite3_create_function(db, "jb_is_client", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_jb_is_client, NULL, NULL);
+	initializeTCCRouting(db);
+}
+
 static int hook_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs)
 {
 	int r = orig_sqlite3_open_v2(filename, ppDb, flags, zVfs);
 	if (r == SQLITE_OK && filename && strstr(filename, "TCC.db")) {
-		gTCCDB = *ppDb;
-		sqlite3_create_function(gTCCDB, "jb_is_client", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_jb_is_client, NULL, NULL);
-		initializeTCCRouting(gTCCDB);
+		setupTCCDB(*ppDb, filename);
 	}
 	return r;
 }
 
 static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail)
 {
-	if (db != gTCCDB || !zSql) {
+	if (!zSql) {
 		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+	}
+
+	// Late-init: detect TCC.db if already open before hook installed
+	if (db != gTCCDB) {
+		const char *filename = sqlite3_db_filename(db, "main");
+		if (filename && strstr(filename, "TCC.db")) {
+			setupTCCDB(db, filename);
+		} else {
+			return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+		}
 	}
 
 	NSString *sql = [NSString stringWithUTF8String:zSql];
@@ -192,10 +226,33 @@ static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sql
 	return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
 }
 
+static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*,int,char**,char**), void *arg, char **errmsg)
+{
+	// Late-init via exec (in case TCC.db opened before hook)
+	if (db && db != gTCCDB) {
+		const char *filename = sqlite3_db_filename(db, "main");
+		if (filename && strstr(filename, "TCC.db")) {
+			setupTCCDB(db, filename);
+		}
+	}
+
+	// Rewrite SQL for TCC.db exec calls
+	if (db == gTCCDB && sql) {
+		NSString *sqlStr = [NSString stringWithUTF8String:sql];
+		if (sqlStr) {
+			NSString *rewritten = rewriteSQLForRouter(sqlStr);
+			if (![rewritten isEqualToString:sqlStr]) {
+				return orig_sqlite3_exec(db, rewritten.UTF8String, callback, arg, errmsg);
+			}
+		}
+	}
+
+	return orig_sqlite3_exec(db, sql, callback, arg, errmsg);
+}
+
 void tccdInit(void)
 {
-	refreshJBBundleIDs();
-
 	MSHookFunction(sqlite3_open_v2, (void *)hook_sqlite3_open_v2, (void **)&orig_sqlite3_open_v2);
 	MSHookFunction(sqlite3_prepare_v2, (void *)hook_sqlite3_prepare_v2, (void **)&orig_sqlite3_prepare_v2);
+	MSHookFunction(sqlite3_exec, (void *)hook_sqlite3_exec, (void **)&orig_sqlite3_exec);
 }

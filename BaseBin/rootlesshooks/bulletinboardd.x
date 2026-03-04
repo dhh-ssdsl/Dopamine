@@ -3,6 +3,12 @@
 #import <libroot.h>
 #import <objc/runtime.h>
 
+// LSApplicationProxy forward declaration (MobileCoreServices private)
+@interface LSApplicationProxy : NSObject
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
+@property (nonatomic, readonly) NSURL *bundleURL;
+@end
+
 static void _bb_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void _bb_log(const char *fmt, ...) {
 	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
@@ -18,34 +24,56 @@ static void _bb_log(const char *fmt, ...) {
 static NSString *kSectionInfoPath = @"/var/mobile/Library/BulletinBoard/VersionedSectionInfo.plist";
 static NSString *kClearedSectionsPath = @"/var/mobile/Library/BulletinBoard/ClearedSections.plist";
 
-static NSSet<NSString *> *gJailbreakBundleIDs = nil;
-static time_t gLastBundleRefresh = 0;
 static __thread BOOL gIsRouting; // Thread-local: prevent recursive hooks per-thread
 
-static void refreshJBBundleIDs(void)
+// JB root path prefix (e.g. /private/preboot/.../procursus)
+static NSString *gJBRootPrefix = nil;
+static dispatch_once_t gJBRootOnce;
+
+static NSString *jbRootPrefix(void)
 {
-	NSMutableSet *bundleIDs = [NSMutableSet set];
+	dispatch_once(&gJBRootOnce, ^{
+		gJBRootPrefix = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/")];
+		// Normalize trailing slash
+		if (![gJBRootPrefix hasSuffix:@"/"]) {
+			gJBRootPrefix = [gJBRootPrefix stringByAppendingString:@"/"];
+		}
+	});
+	return gJBRootPrefix;
+}
+
+// Check if a bundle ID belongs to a JB-installed app by querying LSApplicationProxy
+// for the app's bundle URL and checking if it lives under the JB root prefix.
+// Falls back to /Applications directory scan if LSApplicationProxy is unavailable.
+static BOOL isJBBundleID(NSString *bundleID)
+{
+	if (!bundleID.length) return NO;
+
+	// Primary: query LSApplicationProxy for the bundle path
+	Class LSProxy = NSClassFromString(@"LSApplicationProxy");
+	if (LSProxy) {
+		id proxy = [LSProxy applicationProxyForIdentifier:bundleID];
+		NSURL *bundleURL = [proxy valueForKey:@"bundleURL"];
+		NSString *bundlePath = bundleURL.path;
+		if (bundlePath.length) {
+			BOOL result = [bundlePath hasPrefix:jbRootPrefix()];
+			BB_LOG("isJBBundleID(%s): bundlePath=%s -> %s",
+				   bundleID.UTF8String, bundlePath.UTF8String, result ? "JB" : "system");
+			return result;
+		}
+	}
+
+	// Fallback: check if <jbroot>/Applications/<*.app>/Info.plist contains this bundle ID
+	BB_LOG("isJBBundleID(%s): LSApplicationProxy unavailable, using /Applications fallback", bundleID.UTF8String);
 	NSString *jbAppsPath = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")];
 	NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
 	for (NSString *item in contents) {
 		if (![item hasSuffix:@".app"]) continue;
 		NSString *appPath = [jbAppsPath stringByAppendingPathComponent:item];
 		NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
-		NSString *bundleID = info[@"CFBundleIdentifier"];
-		if (bundleID) {
-			[bundleIDs addObject:bundleID];
-		}
+		if ([info[@"CFBundleIdentifier"] isEqualToString:bundleID]) return YES;
 	}
-	gJailbreakBundleIDs = [bundleIDs copy];
-	gLastBundleRefresh = time(NULL);
-}
-
-static void refreshJBBundleIDsIfNeeded(void)
-{
-	time_t now = time(NULL);
-	if (!gJailbreakBundleIDs || (now - gLastBundleRefresh) >= 10) {
-		refreshJBBundleIDs();
-	}
+	return NO;
 }
 
 static NSString *jbNotificationPlistPath(void)
@@ -109,7 +137,6 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 	if (isBulletinBoardPlist(path)) {
 		BB_LOG("READ intercepted: %s", path.UTF8String);
 		gIsRouting = YES;
-		refreshJBBundleIDsIfNeeded();
 
 		// Read JB notification plist
 		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbNotificationPlistPath());
@@ -180,9 +207,6 @@ static void performSplitWrite(NSData *data, NSString *path,
 							  BOOL (^writeSystem)(NSData *d, NSString *p),
 							  BOOL (^writeJB)(NSData *d, NSString *p))
 {
-	// Always force-refresh on writes (writes are rare, never use stale cache here)
-	refreshJBBundleIDs();
-
 	NSError *error = nil;
 	NSPropertyListFormat format = 0;
 	NSDictionary *fullDict = [NSPropertyListSerialization propertyListWithData:data options:0 format:&format error:&error];
@@ -192,18 +216,11 @@ static void performSplitWrite(NSData *data, NSString *path,
 		return;
 	}
 
-	// If no JB bundle IDs are known yet (e.g. mid-boot), write system data
-	// to system path but do NOT overwrite the JB plist — leave it intact.
-	if (!gJailbreakBundleIDs.count) {
-		BB_LOG("performSplitWrite: JB bundle ID set empty, writing all to system path (JB plist preserved)");
-		writeSystem(data, path);
-		return;
-	}
-
 	NSMutableDictionary *systemEntries = [NSMutableDictionary dictionary];
 	NSMutableDictionary *jbEntries = [NSMutableDictionary dictionary];
+
 	for (NSString *key in fullDict) {
-		if ([gJailbreakBundleIDs containsObject:key]) {
+		if (isJBBundleID(key)) {
 			jbEntries[key] = fullDict[key];
 		} else {
 			systemEntries[key] = fullDict[key];
@@ -326,8 +343,6 @@ static NSData *hook_NSData_dataWithContentsOfFile_options_error(id self, SEL _cm
 void bulletinboarddInit(void)
 {
 	BB_LOG("bulletinboarddInit() called in process: %s (pid=%d)", getprogname(), getpid());
-	refreshJBBundleIDs();
-	BB_LOG("Found %lu JB bundle IDs", (unsigned long)gJailbreakBundleIDs.count);
 	ensureJBBulletinBoardDir();
 
 	// Hook NSData +dataWithContentsOfFile: for read interception
