@@ -168,176 +168,154 @@ static BOOL isNEPlist(NSString *path)
 	return [path hasSuffix:kNEPlistName];
 }
 
-static __thread BOOL gNEIsRouting = NO; // guards recursive read-hook calls
-
-
-// Scan $objects for JB bundle IDs and log them
-// Returns number of JB bundle IDs found in the plist's $objects array.
-static NSUInteger countJBBundleIDsInPlist(NSData *data)
-{
-	if (!data) return 0;
-	NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data
-	                                                                options:0
-	                                                                 format:nil
-	                                                                  error:nil];
-	NSArray *objects = plist[@"$objects"];
-	if (![objects isKindOfClass:[NSArray class]]) return 0;
-
-	NSUInteger count = 0;
-	for (id obj in objects) {
-		if (![obj isKindOfClass:[NSString class]]) continue;
-		NSString *str = (NSString *)obj;
-		if ([str hasPrefix:@"$"] || [str hasPrefix:@"NS."] || str.length > 256) continue;
-		if ([str componentsSeparatedByString:@"."].count < 3) continue;
-		if (isJBBundleID(str)) count++;
-	}
-	return count;
-}
-
-// Logs JB bundle IDs found in the plist's $objects array (diagnostic only).
-static void logNEPlistBundleIDs(NSData *data, const char *context)
-{
-	NSUInteger jbCount = countJBBundleIDsInPlist(data);
-	NSError *error = nil;
-	NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data
-	                                                                options:0
-	                                                                 format:nil
-	                                                                  error:&error];
-	NSArray *objects = plist[@"$objects"];
-	if (![objects isKindOfClass:[NSArray class]]) {
-		NE_LOG("%s: no $objects in plist (parse error: %s)", context,
-		       error.localizedDescription.UTF8String ?: "unknown");
-		return;
-	}
-	NSUInteger sysCount = 0;
-	for (id obj in objects) {
-		if (![obj isKindOfClass:[NSString class]]) continue;
-		NSString *str = (NSString *)obj;
-		if ([str hasPrefix:@"$"] || [str hasPrefix:@"NS."] || str.length > 256) continue;
-		NSArray *parts = [str componentsSeparatedByString:@"."];
-		if (parts.count >= 3 && !isJBBundleID(str)) sysCount++;
-	}
-	NE_LOG("%s: $objects scan: %lu JB bundleIDs, %lu plausible system bundleIDs",
-	       context, (unsigned long)jbCount, (unsigned long)sysCount);
-}
-
-// NOTE: nehelper writes NE plist via CFPreferences XPC → cfprefsd → disk.
-// The actual NSData write happens inside cfprefsd, not here.
-// Write mirroring is handled in cfprefsd.x instead.
-//
-// READ: We compare the system plist and the JB mirror by JB bundle ID count.
-// If the JB mirror has MORE JB entries, it means the system plist was reset
-// after a rejailbreak (common) and the mirror still has the authoritative data.
-// In that case we return the JB mirror so nehelper uses the correct full state.
-
-static NSString *jbNEMirrorPath(void)
+static NSString *jbNEPlistPath(void)
 {
 	static NSString *path = nil;
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{
 		path = [NSString stringWithUTF8String:
-		        JBROOT_PATH_CSTRING("/Library/Preferences/com.apple.networkextension.plist")];
+		        JBROOT_PATH_CSTRING("/var/preferences/com.apple.networkextension.plist")];
 	});
 	return path;
 }
 
-static NSData *(*orig_NSData_dataWithContentsOfFile_options_error)(id self, SEL _cmd, NSString *path, NSDataReadingOptions opts, NSError **error);
-static NSData *hook_NSData_dataWithContentsOfFile_options_error(id self, SEL _cmd, NSString *path, NSDataReadingOptions opts, NSError **error)
+static void ensureJBPreferencesDir(void)
 {
-	NSData *data = orig_NSData_dataWithContentsOfFile_options_error(self, _cmd, path, opts, error);
-	if (!gNEIsRouting && isNEPlist(path)) {
-		NE_LOG("READ intercepted: %s (%lu bytes)", path.UTF8String, (unsigned long)data.length);
-		logNEPlistBundleIDs(data, "READ:system");
-
-		// Check JB mirror for additional JB entries that may be missing from the system plist
-		gNEIsRouting = YES;
-		NSData *jbData = orig_NSData_dataWithContentsOfFile_options_error(
-			self, _cmd, jbNEMirrorPath(), opts, nil);
-		gNEIsRouting = NO;
-
-		if (jbData) {
-			NSUInteger sysJBCount  = countJBBundleIDsInPlist(data);
-			NSUInteger mirrorJBCount = countJBBundleIDsInPlist(jbData);
-			NE_LOG("READ: system JB count=%lu, mirror JB count=%lu",
-			       (unsigned long)sysJBCount, (unsigned long)mirrorJBCount);
-			if (mirrorJBCount > sysJBCount) {
-				NE_LOG("READ: mirror has more JB entries → using JB mirror");
-				return jbData;
-			}
-		}
+	NSString *dir = [jbNEPlistPath() stringByDeletingLastPathComponent];
+	if (![[NSFileManager defaultManager] fileExistsAtPath:dir]) {
+		[[NSFileManager defaultManager] createDirectoryAtPath:dir
+		                          withIntermediateDirectories:YES
+		                                           attributes:nil
+		                                               error:nil];
 	}
-	return data;
 }
 
-static NSData *(*orig_NSData_dataWithContentsOfFile)(id self, SEL _cmd, NSString *path);
-static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *path)
+static __thread BOOL gNEIsRouting = NO;
+
+// ============================================================
+// Objective-C Object Probes for NEConfiguration / NEPathController
+// ============================================================
+
+// Forward declarations for Private Framework classes
+@interface NEPathRule : NSObject
+@property (retain) NSString *matchSigningIdentifier;
+@property NSInteger cellularBehavior;
+@property NSInteger wifiBehavior;
+@end
+
+@interface NEPathController : NSObject
+@property (retain) NSArray *pathRules;
+@property (retain) NSArray *payloadAppRules;
+@end
+
+@interface NEConfiguration : NSObject
+@property (readonly) NEPathController *pathController;
+@property (retain) NSString *identifier;
+@property (retain) NSString *name;
+@end
+
+
+static void (*orig_encode_object_forKey)(id self, SEL _cmd, id obj, NSString *key);
+static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 {
-	NSData *data = orig_NSData_dataWithContentsOfFile(self, _cmd, path);
-	if (!gNEIsRouting && isNEPlist(path)) {
-		NE_LOG("READ(basic) intercepted: %s (%lu bytes)", path.UTF8String, (unsigned long)data.length);
-		logNEPlistBundleIDs(data, "READ:system(basic)");
+	if ([key isEqualToString:@"config-aggregate-rules"] ||
+	    [key isEqualToString:@"Rules"] ||
+	    [key isEqualToString:@"PayloadAppRules"]) {
 
-		gNEIsRouting = YES;
-		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbNEMirrorPath());
-		gNEIsRouting = NO;
+		NE_LOG("PROBE ENCODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
 
-		if (jbData) {
-			NSUInteger sysJBCount    = countJBBundleIDsInPlist(data);
-			NSUInteger mirrorJBCount = countJBBundleIDsInPlist(jbData);
-			NE_LOG("READ(basic): system JB count=%lu, mirror JB count=%lu",
-			       (unsigned long)sysJBCount, (unsigned long)mirrorJBCount);
-			if (mirrorJBCount > sysJBCount) {
-				NE_LOG("READ(basic): mirror has more JB entries → using JB mirror");
-				return jbData;
+		if ([obj isKindOfClass:[NSArray class]]) {
+			NSArray *arr = (NSArray *)obj;
+			NE_LOG("PROBE ENCODE: array count=%lu", (unsigned long)arr.count);
+			int jbCount = 0;
+			int sysCount = 0;
+			for (id rule in arr) {
+				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
+					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
+					if (bid) {
+						if (isJBBundleID(bid.UTF8String)) {
+							jbCount++;
+						} else {
+							sysCount++;
+						}
+					}
+				}
 			}
+			NE_LOG("PROBE ENCODE: array analysis -> JB rules: %d, System rules: %d", jbCount, sysCount);
 		}
 	}
-	return data;
+
+	if ([obj isKindOfClass:NSClassFromString(@"NEConfiguration")]) {
+		NE_LOG("PROBE ENCODE: Found NEConfiguration");
+	}
+	if ([obj isKindOfClass:NSClassFromString(@"NEPathController")]) {
+		NE_LOG("PROBE ENCODE: Found NEPathController");
+	}
+
+	orig_encode_object_forKey(self, _cmd, obj, key);
 }
+
+
+static id (*orig_decode_object_forKey)(id self, SEL _cmd, NSString *key);
+static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
+{
+	id obj = orig_decode_object_forKey(self, _cmd, key);
+
+	if (obj && ([key isEqualToString:@"config-aggregate-rules"] ||
+	            [key isEqualToString:@"Rules"] ||
+	            [key isEqualToString:@"PayloadAppRules"])) {
+
+		NE_LOG("PROBE DECODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
+
+		if ([obj isKindOfClass:[NSArray class]]) {
+			NSArray *arr = (NSArray *)obj;
+			NE_LOG("PROBE DECODE: array count=%lu", (unsigned long)arr.count);
+			int jbCount = 0;
+			int sysCount = 0;
+			for (id rule in arr) {
+				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
+					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
+					if (bid) {
+						if (isJBBundleID(bid.UTF8String)) {
+							jbCount++;
+						} else {
+							sysCount++;
+						}
+					}
+				}
+			}
+			NE_LOG("PROBE DECODE: array analysis -> JB rules: %d, System rules: %d", jbCount, sysCount);
+		}
+	}
+
+	return obj;
+}
+
 
 // ============================================================
 void nehelperInit(void)
 {
 	NE_LOG("nehelperInit() called in process: %s (pid=%d)", getprogname(), getpid());
 
-	// -- NSKeyedArchiver diagnostic hooks --
+	// -- NSKeyedArchiver object probes --
 	Class archiverClass = objc_getClass("NSKeyedArchiver");
 	if (archiverClass) {
 		MSHookMessageEx(archiverClass,
 		    @selector(encodeObject:forKey:),
 		    (IMP)hook_encode_object_forKey,
 		    (IMP *)&orig_encode_object_forKey);
-		MSHookMessageEx(archiverClass,
-		    @selector(encodeObject:),
-		    (IMP)hook_encode_object,
-		    (IMP *)&orig_encode_object);
-		NE_LOG("nehelperInit: NSKeyedArchiver encode hooks installed");
+		NE_LOG("nehelperInit: NSKeyedArchiver probe installed");
 	}
 
-	// -- NSKeyedUnarchiver diagnostic hooks --
+	// -- NSKeyedUnarchiver object probes --
 	Class unarchiverClass = objc_getClass("NSKeyedUnarchiver");
 	if (unarchiverClass) {
 		MSHookMessageEx(unarchiverClass,
 		    @selector(decodeObjectForKey:),
 		    (IMP)hook_decode_object_forKey,
 		    (IMP *)&orig_decode_object_forKey);
-		NE_LOG("nehelperInit: NSKeyedUnarchiver decode hooks installed");
+		NE_LOG("nehelperInit: NSKeyedUnarchiver probe installed");
 	}
 
-	// -- NSData file I/O hooks (read-only, diagnostic) --
-	// Write mirroring is handled in cfprefsd.x (that's where the disk write actually happens).
-	MSHookMessageEx(
-		objc_getMetaClass("NSData"),
-		@selector(dataWithContentsOfFile:options:error:),
-		(IMP)hook_NSData_dataWithContentsOfFile_options_error,
-		(IMP *)&orig_NSData_dataWithContentsOfFile_options_error
-	);
-	MSHookMessageEx(
-		objc_getMetaClass("NSData"),
-		@selector(dataWithContentsOfFile:),
-		(IMP)hook_NSData_dataWithContentsOfFile,
-		(IMP *)&orig_NSData_dataWithContentsOfFile
-	);
-
-	NE_LOG("nehelperInit: all hooks installed");
+	NE_LOG("nehelperInit: Objective-C object probes installed");
 }
