@@ -47,5 +47,4 @@ NSString* getProcessName()
 		extern void nehelperInit(void);
 		nehelperInit();
 	}
-	}
 }
