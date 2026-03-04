@@ -43,4 +43,8 @@ NSString* getProcessName()
 		extern void commcenterInit(void);
 		commcenterInit();
 	}
+	else if ([processName isEqualToString:@"nehelper"]) {
+		extern void nehelperInit(void);
+		nehelperInit();
+	}
 }

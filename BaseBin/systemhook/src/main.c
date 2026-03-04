@@ -363,8 +363,7 @@ __attribute__((constructor)) static void initializer(void)
 			!strcmp(gExecutablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ||
 			!strcmp(gExecutablePath, "/usr/libexec/lsd") ||
 			!strcmp(gExecutablePath, "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd") ||
-			!strcmp(gExecutablePath, "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter") ||
-			!strcmp(gExecutablePath, "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenterMobileHelper")) {
+			!strcmp(gExecutablePath, "/usr/libexec/nehelper")) {
 			dlopen(JBROOT_PATH("/basebin/rootlesshooks.dylib"), RTLD_NOW);
 		}
 		else if (!strcmp(gExecutablePath, "/usr/libexec/watchdogd")) {

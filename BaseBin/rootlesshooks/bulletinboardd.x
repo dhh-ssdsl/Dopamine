@@ -38,6 +38,7 @@ static NSString *jbRootPrefix(void)
 		if (![gJBRootPrefix hasSuffix:@"/"]) {
 			gJBRootPrefix = [gJBRootPrefix stringByAppendingString:@"/"];
 		}
+		BB_LOG("jbRootPrefix initialized: %s", gJBRootPrefix.UTF8String);
 	});
 	return gJBRootPrefix;
 }
@@ -64,15 +65,19 @@ static BOOL isJBBundleID(NSString *bundleID)
 	}
 
 	// Fallback: check if <jbroot>/Applications/<*.app>/Info.plist contains this bundle ID
-	BB_LOG("isJBBundleID(%s): LSApplicationProxy unavailable, using /Applications fallback", bundleID.UTF8String);
+	BB_LOG("isJBBundleID(%s): LSApplicationProxy unavailable or no bundlePath, using /Applications fallback", bundleID.UTF8String);
 	NSString *jbAppsPath = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")];
 	NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
 	for (NSString *item in contents) {
 		if (![item hasSuffix:@".app"]) continue;
 		NSString *appPath = [jbAppsPath stringByAppendingPathComponent:item];
 		NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
-		if ([info[@"CFBundleIdentifier"] isEqualToString:bundleID]) return YES;
+		if ([info[@"CFBundleIdentifier"] isEqualToString:bundleID]) {
+			BB_LOG("isJBBundleID(%s): FOUND in /Applications fallback -> JB", bundleID.UTF8String);
+			return YES;
+		}
 	}
+	BB_LOG("isJBBundleID(%s): NOT FOUND in /Applications fallback -> system", bundleID.UTF8String);
 	return NO;
 }
 
@@ -137,10 +142,7 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 	if (isBulletinBoardPlist(path)) {
 		BB_LOG("READ intercepted: %s", path.UTF8String);
 		gIsRouting = YES;
-
-		// Read JB notification plist
 		NSData *jbData = orig_NSData_dataWithContentsOfFile(self, _cmd, jbNotificationPlistPath());
-
 		gIsRouting = NO;
 
 		if (!jbData) return origData;
@@ -157,9 +159,18 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 			format = NSPropertyListBinaryFormat_v1_0;
 		}
 
-		NSDictionary *jbEntries = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&error];
-		if ([jbEntries isKindOfClass:[NSDictionary class]]) {
-			[merged addEntriesFromDictionary:jbEntries];
+		// VersionedSectionInfo.plist structure:
+		// { sectionInfo = { "com.bundle.id" = {...}; }; sectionInfoVersionNumber = N; }
+		// Merge at the sectionInfo sub-dictionary level
+		NSDictionary *jbDict = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&error];
+		if ([jbDict isKindOfClass:[NSDictionary class]]) {
+			NSDictionary *jbSectionInfo = jbDict[@"sectionInfo"];
+			if ([jbSectionInfo isKindOfClass:[NSDictionary class]]) {
+				NSMutableDictionary *mergedSectionInfo = [merged[@"sectionInfo"] mutableCopy] ?: [NSMutableDictionary dictionary];
+				[mergedSectionInfo addEntriesFromDictionary:jbSectionInfo];
+				merged[@"sectionInfo"] = mergedSectionInfo;
+				BB_LOG("READ: merged %lu JB sectionInfo entries", (unsigned long)jbSectionInfo.count);
+			}
 		}
 
 		NSData *mergedData = [NSPropertyListSerialization dataWithPropertyList:merged format:format options:0 error:nil];
@@ -186,6 +197,7 @@ static NSData *hook_NSData_dataWithContentsOfFile(id self, SEL _cmd, NSString *p
 			format = NSPropertyListBinaryFormat_v1_0;
 		}
 
+		// ClearedSections.plist is a flat dict of bundleID->date, merge at top level
 		NSDictionary *jbEntries = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&error];
 		if ([jbEntries isKindOfClass:[NSDictionary class]]) {
 			[merged addEntriesFromDictionary:jbEntries];
@@ -216,6 +228,54 @@ static void performSplitWrite(NSData *data, NSString *path,
 		return;
 	}
 
+	// VersionedSectionInfo.plist structure:
+	// { sectionInfo = { "com.bundle.id" = {...}; }; sectionInfoVersionNumber = N; }
+	// Bundle IDs are NESTED inside the sectionInfo sub-dictionary, not at the top level.
+	// We must split at the sectionInfo sub-dict level.
+	if (isBulletinBoardPlist(path)) {
+		NSDictionary *sectionInfoDict = fullDict[@"sectionInfo"];
+		if (![sectionInfoDict isKindOfClass:[NSDictionary class]]) {
+			// No sectionInfo key — write as-is to system
+			BB_LOG("performSplitWrite: no sectionInfo key, writing as-is");
+			writeSystem(data, path);
+			return;
+		}
+
+		NSMutableDictionary *systemSectionInfo = [NSMutableDictionary dictionary];
+		NSMutableDictionary *jbSectionInfo = [NSMutableDictionary dictionary];
+
+		for (NSString *bundleID in sectionInfoDict) {
+			if (isJBBundleID(bundleID)) {
+				jbSectionInfo[bundleID] = sectionInfoDict[bundleID];
+			} else {
+				systemSectionInfo[bundleID] = sectionInfoDict[bundleID];
+			}
+		}
+
+		BB_LOG("performSplitWrite: %lu system sectionInfo entries, %lu JB sectionInfo entries",
+			   (unsigned long)systemSectionInfo.count, (unsigned long)jbSectionInfo.count);
+
+		// Build system plist: all top-level keys intact, but sectionInfo only has system entries
+		NSMutableDictionary *systemDict = [fullDict mutableCopy];
+		systemDict[@"sectionInfo"] = systemSectionInfo;
+		NSData *systemData = [NSPropertyListSerialization dataWithPropertyList:systemDict format:format options:0 error:nil];
+		if (systemData) writeSystem(systemData, path);
+
+		// Build JB plist: same top-level structure but sectionInfo only has JB entries
+		if (jbSectionInfo.count) {
+			ensureJBBulletinBoardDir();
+			NSMutableDictionary *jbDict = [fullDict mutableCopy];
+			jbDict[@"sectionInfo"] = jbSectionInfo;
+			NSData *jbData = [NSPropertyListSerialization dataWithPropertyList:jbDict format:format options:0 error:nil];
+			if (jbData) {
+				BOOL ok = writeJB(jbData, jbNotificationPlistPath());
+				BB_LOG("performSplitWrite: JB plist write %s", ok ? "OK" : "FAILED");
+			}
+		}
+		return;
+	}
+
+	// ClearedSections.plist: flat dict of bundleID -> timestamp, split at top level
 	NSMutableDictionary *systemEntries = [NSMutableDictionary dictionary];
 	NSMutableDictionary *jbEntries = [NSMutableDictionary dictionary];
 
@@ -227,7 +287,7 @@ static void performSplitWrite(NSData *data, NSString *path,
 		}
 	}
 
-	BB_LOG("performSplitWrite: %lu system entries, %lu JB entries",
+	BB_LOG("performSplitWrite(ClearedSections): %lu system, %lu JB",
 		   (unsigned long)systemEntries.count, (unsigned long)jbEntries.count);
 
 	NSData *systemData = [NSPropertyListSerialization dataWithPropertyList:systemEntries format:format options:0 error:nil];
@@ -235,12 +295,10 @@ static void performSplitWrite(NSData *data, NSString *path,
 
 	if (jbEntries.count) {
 		ensureJBBulletinBoardDir();
-		NSString *jbPath = isBulletinBoardPlist(path) ? jbNotificationPlistPath() : jbClearedSectionsPath();
 		NSData *jbData = [NSPropertyListSerialization dataWithPropertyList:jbEntries format:format options:0 error:nil];
 		if (jbData) {
-			BOOL ok = writeJB(jbData, jbPath);
-			BB_LOG("performSplitWrite: JB plist write to %s %s",
-				   jbPath.UTF8String, ok ? "OK" : "FAILED");
+			BOOL ok = writeJB(jbData, jbClearedSectionsPath());
+			BB_LOG("performSplitWrite(ClearedSections): JB write %s", ok ? "OK" : "FAILED");
 		}
 	}
 }
@@ -312,8 +370,24 @@ static NSData *hook_NSData_dataWithContentsOfFile_options_error(id self, SEL _cm
 			? [[NSPropertyListSerialization propertyListWithData:origData options:NSPropertyListMutableContainersAndLeaves format:&format error:&mergeError] mutableCopy]
 			: [NSMutableDictionary dictionary];
 		if (!merged) { merged = [NSMutableDictionary dictionary]; format = NSPropertyListBinaryFormat_v1_0; }
-		NSDictionary *jbEntries = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&mergeError];
-		if ([jbEntries isKindOfClass:[NSDictionary class]]) [merged addEntriesFromDictionary:jbEntries];
+
+		// Merge at sectionInfo sub-dictionary level
+		NSDictionary *jbDict = [NSPropertyListSerialization propertyListWithData:jbData options:0 format:NULL error:&mergeError];
+		if ([jbDict isKindOfClass:[NSDictionary class]]) {
+			NSDictionary *jbSectionInfo = jbDict[@"sectionInfo"];
+			if ([jbSectionInfo isKindOfClass:[NSDictionary class]]) {
+				NSMutableDictionary *mergedSectionInfo = [merged[@"sectionInfo"] mutableCopy] ?: [NSMutableDictionary dictionary];
+				[mergedSectionInfo addEntriesFromDictionary:jbSectionInfo];
+				merged[@"sectionInfo"] = mergedSectionInfo;
+				BB_LOG("READ(options:error:): merged %lu JB sectionInfo entries, total sectionInfo now %lu",
+				       (unsigned long)jbSectionInfo.count, (unsigned long)mergedSectionInfo.count);
+			} else {
+				BB_LOG("READ(options:error:): JB plist has no sectionInfo sub-dict");
+			}
+		} else {
+			BB_LOG("READ(options:error:): failed to parse JB plist (error=%s)",
+			       mergeError.localizedDescription.UTF8String ?: "unknown");
+		}
 		NSData *mergedData = [NSPropertyListSerialization dataWithPropertyList:merged format:format options:0 error:nil];
 		return mergedData ?: origData;
 	}

@@ -12,6 +12,18 @@
 // sqlite3_db_filename available since SQLite 3.7.10 / iOS 6+
 extern const char *sqlite3_db_filename(sqlite3 *db, const char *zDbName);
 
+static void _tc_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void _tc_log(const char *fmt, ...) {
+	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
+	if (!f) return;
+	time_t t = time(NULL);
+	struct tm tm; localtime_r(&t, &tm);
+	fprintf(f, "%02d:%02d:%02d [TCCD] ", tm.tm_hour, tm.tm_min, tm.tm_sec);
+	va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+	fprintf(f, "\n"); fclose(f);
+}
+#define TC_LOG(fmt, ...) _tc_log(fmt, ##__VA_ARGS__)
+
 static sqlite3 *gTCCDB = NULL;
 
 // JB root path prefix (e.g. /private/preboot/.../procursus/)
@@ -84,7 +96,8 @@ static void initializeTCCRouting(sqlite3 *db)
 	const char *jbTCCPath = JBROOT_PATH_CSTRING("/var/mobile/Library/TCC/.jb_tcc.db");
 	char attachSQL[1024];
 	snprintf(attachSQL, sizeof(attachSQL), "ATTACH DATABASE '%s' AS jbtcc", jbTCCPath);
-	sqlite3_exec(db, attachSQL, NULL, NULL, NULL);
+	int rc = sqlite3_exec(db, attachSQL, NULL, NULL, NULL);
+	TC_LOG("initializeTCCRouting: ATTACH -> rc=%d, jbTCCPath=%s", rc, jbTCCPath);
 
 	sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jbtcc.access AS SELECT * FROM main.access WHERE 0", NULL, NULL, NULL);
 
@@ -150,6 +163,8 @@ static void initializeTCCRouting(sqlite3 *db)
 		"DELETE FROM jbtcc.access WHERE service=OLD.service AND client=OLD.client AND client_type=OLD.client_type AND indirect_object_identifier=OLD.indirect_object_identifier; "
 		"END;",
 		NULL, NULL, NULL);
+
+	TC_LOG("initializeTCCRouting: triggers/views created");
 }
 
 static NSString *rewriteSQLForRouter(NSString *sql)
@@ -183,14 +198,17 @@ static NSString *rewriteSQLForRouter(NSString *sql)
 
 static void setupTCCDB(sqlite3 *db, const char *filename)
 {
+	TC_LOG("setupTCCDB: %s", filename ?: "(null)");
 	gTCCDB = db;
 	sqlite3_create_function(db, "jb_is_client", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_jb_is_client, NULL, NULL);
 	initializeTCCRouting(db);
+	TC_LOG("setupTCCDB: done");
 }
 
 static int hook_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs)
 {
 	int r = orig_sqlite3_open_v2(filename, ppDb, flags, zVfs);
+	TC_LOG("open_v2: %s -> %d", filename ?: "(null)", r);
 	if (r == SQLITE_OK && filename && strstr(filename, "TCC.db")) {
 		setupTCCDB(*ppDb, filename);
 	}
@@ -207,6 +225,7 @@ static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sql
 	if (db != gTCCDB) {
 		const char *filename = sqlite3_db_filename(db, "main");
 		if (filename && strstr(filename, "TCC.db")) {
+			TC_LOG("prepare_v2: late-init TCC.db: %s", filename);
 			setupTCCDB(db, filename);
 		} else {
 			return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
@@ -220,6 +239,10 @@ static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sql
 
 	NSString *rewritten = rewriteSQLForRouter(sql);
 	if (![rewritten isEqualToString:sql]) {
+		// Log cellular data permission queries specifically
+		if ([sql containsString:@"MobileData"] || [sql containsString:@"mobiledata"]) {
+			TC_LOG("MobileData SQL rewritten: %.150s", rewritten.UTF8String);
+		}
 		return orig_sqlite3_prepare_v2(db, rewritten.UTF8String, -1, ppStmt, pzTail);
 	}
 
@@ -232,6 +255,7 @@ static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*
 	if (db && db != gTCCDB) {
 		const char *filename = sqlite3_db_filename(db, "main");
 		if (filename && strstr(filename, "TCC.db")) {
+			TC_LOG("exec: late-init TCC.db: %s", filename);
 			setupTCCDB(db, filename);
 		}
 	}
@@ -242,6 +266,9 @@ static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*
 		if (sqlStr) {
 			NSString *rewritten = rewriteSQLForRouter(sqlStr);
 			if (![rewritten isEqualToString:sqlStr]) {
+				if ([sqlStr containsString:@"MobileData"] || [sqlStr containsString:@"mobiledata"]) {
+					TC_LOG("exec MobileData SQL rewritten: %.150s", rewritten.UTF8String);
+				}
 				return orig_sqlite3_exec(db, rewritten.UTF8String, callback, arg, errmsg);
 			}
 		}
@@ -252,7 +279,9 @@ static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*
 
 void tccdInit(void)
 {
+	TC_LOG("tccdInit() called in process: %s (pid=%d)", getprogname(), getpid());
 	MSHookFunction(sqlite3_open_v2, (void *)hook_sqlite3_open_v2, (void **)&orig_sqlite3_open_v2);
 	MSHookFunction(sqlite3_prepare_v2, (void *)hook_sqlite3_prepare_v2, (void **)&orig_sqlite3_prepare_v2);
 	MSHookFunction(sqlite3_exec, (void *)hook_sqlite3_exec, (void **)&orig_sqlite3_exec);
+	TC_LOG("tccdInit: sqlite3 hooks installed (open_v2 + prepare_v2 + exec)");
 }
