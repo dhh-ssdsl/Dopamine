@@ -233,7 +233,7 @@ static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
 					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
 					if (bid) {
-						if (isJBBundleID(bid.UTF8String)) {
+						if (isJBBundleID(bid)) {
 							jbCount++;
 						} else {
 							sysCount++;
@@ -276,7 +276,7 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
 					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
 					if (bid) {
-						if (isJBBundleID(bid.UTF8String)) {
+						if (isJBBundleID(bid)) {
 							jbCount++;
 						} else {
 							sysCount++;
