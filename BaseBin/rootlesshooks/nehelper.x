@@ -72,8 +72,6 @@ static BOOL isJBBundleID(NSString *bundleID)
 // Once identified, replace with routing logic.
 // ============================================================
 
-// Track whether we are in an NE-related archiving context
-static __thread BOOL gInNEArchive = NO;
 
 // -- NSKeyedArchiver hooks --
 
