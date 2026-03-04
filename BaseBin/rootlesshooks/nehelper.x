@@ -63,26 +63,11 @@ static BOOL isJBBundleID(NSString *bundleID)
 }
 
 // ============================================================
-// Dynamic method probe: hooks every instance method of a class,
-// logs when the method is called.
+// Class Method Probe
+// Scans instance methods of a class and logs those matching
+// common save/load/config/network-related keywords.
 // ============================================================
 
-// Generic trampoline that logs method name when called.
-// We use a single global IMP array trick with libffi or similar.
-// Since we don't have libffi, use a simpler approach:
-// just hook 'methods that look like save/load/write/update/commit/serialize'.
-
-typedef void (*VoidIMP)(id, SEL);
-static void (*orig_ne_void_methods[64])(id, SEL);
-static char gNEProbeMethodNames[64][256];
-static int gNEProbeCount = 0;
-
-static void ne_probe_trampoline_log(id self, SEL cmd, ...)
-{
-	NE_LOG("PROBE CALL: [%s %s]", object_getClassName(self), sel_getName(cmd));
-}
-
-// Hook all instance methods of a class whose name matches any of the filter words.
 static void probeClassMethods(Class cls, const char *className)
 {
 	if (!cls) return;
@@ -91,43 +76,41 @@ static void probeClassMethods(Class cls, const char *className)
 	NE_LOG("PROBE: scanning class %s, found %u methods", className, methodCount);
 	for (unsigned int i = 0; i < methodCount; i++) {
 		const char *name = sel_getName(method_getName(methods[i]));
-		// Filter for methods that are likely related to saving/loading/updating
-		if (strstr(name, "save") || strstr(name, "Save") ||
-		    strstr(name, "write") || strstr(name, "Write") ||
-		    strstr(name, "store") || strstr(name, "Store") ||
-		    strstr(name, "commit") || strstr(name, "Commit") ||
-		    strstr(name, "persist") || strstr(name, "Persist") ||
-		    strstr(name, "update") || strstr(name, "Update") ||
-		    strstr(name, "sync") || strstr(name, "Sync") ||
-		    strstr(name, "load") || strstr(name, "Load") ||
-		    strstr(name, "read") || strstr(name, "Read") ||
-		    strstr(name, "fetch") || strstr(name, "Fetch") ||
-		    strstr(name, "encode") || strstr(name, "decode") ||
-		    strstr(name, "Rule") || strstr(name, "rule") ||
-		    strstr(name, "Config") || strstr(name, "config") ||
-		    strstr(name, "cellular") || strstr(name, "Cellular") ||
-		    strstr(name, "wifi") || strstr(name, "Wifi") ||
-		    strstr(name, "network") || strstr(name, "Network") ||
-		    strstr(name, "path") || strstr(name, "Path")
+		if (strstr(name, "save")     || strstr(name, "Save")    ||
+		    strstr(name, "write")    || strstr(name, "Write")   ||
+		    strstr(name, "store")    || strstr(name, "Store")   ||
+		    strstr(name, "commit")   || strstr(name, "Commit")  ||
+		    strstr(name, "persist")  || strstr(name, "Persist") ||
+		    strstr(name, "update")   || strstr(name, "Update")  ||
+		    strstr(name, "sync")     || strstr(name, "Sync")    ||
+		    strstr(name, "load")     || strstr(name, "Load")    ||
+		    strstr(name, "read")     || strstr(name, "Read")    ||
+		    strstr(name, "fetch")    || strstr(name, "Fetch")   ||
+		    strstr(name, "encode")   || strstr(name, "decode")  ||
+		    strstr(name, "Rule")     || strstr(name, "rule")    ||
+		    strstr(name, "Config")   || strstr(name, "config")  ||
+		    strstr(name, "cellular") || strstr(name, "Cellular")||
+		    strstr(name, "wifi")     || strstr(name, "Wifi")    ||
+		    strstr(name, "network")  || strstr(name, "Network") ||
+		    strstr(name, "path")     || strstr(name, "Path")
 		) {
-			NE_LOG("PROBE: will hook [%s %s]", className, name);
+			NE_LOG("PROBE: found [%s %s]", className, name);
 		}
 	}
 	free(methods);
 }
 
 // ============================================================
-// NSKeyedArchiver/UnArchiver route probes:
-// Only log encode/decode of the keys we care about
-// (config-aggregate-rules, Rules, PathController).
+// NSKeyedArchiver / NSKeyedUnarchiver Hooks
+// Monitors encode/decode for VPN config-related keys.
 // ============================================================
 
 static void (*orig_encode_object_forKey)(id self, SEL _cmd, id obj, NSString *key);
 static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 {
 	if ([key isEqualToString:@"config-aggregate-rules"] ||
-	    [key isEqualToString:@"Rules"] ||
-	    [key isEqualToString:@"PayloadAppRules"] ||
+	    [key isEqualToString:@"Rules"]                  ||
+	    [key isEqualToString:@"PayloadAppRules"]        ||
 	    [key isEqualToString:@"PathController"]) {
 
 		NE_LOG("PROBE ENCODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
@@ -136,6 +119,7 @@ static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 			NSArray *arr = (NSArray *)obj;
 			NE_LOG("PROBE ENCODE: array count=%lu", (unsigned long)arr.count);
 			int jbCount = 0, sysCount = 0;
+			static int logged = 0;
 			for (id rule in arr) {
 				if ([rule respondsToSelector:@selector(matchSigningIdentifier)]) {
 					NSString *bid = [rule valueForKey:@"matchSigningIdentifier"];
@@ -144,9 +128,6 @@ static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 						else sysCount++;
 					}
 				}
-				// Log ALL property names on the first few rule objects
-				// so we know exactly what properties are available
-				static int logged = 0;
 				if (logged < 3) {
 					logged++;
 					unsigned int propCount = 0;
@@ -173,8 +154,8 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 	id obj = orig_decode_object_forKey(self, _cmd, key);
 
 	if (obj && ([key isEqualToString:@"config-aggregate-rules"] ||
-	            [key isEqualToString:@"Rules"] ||
-	            [key isEqualToString:@"PayloadAppRules"] ||
+	            [key isEqualToString:@"Rules"]                  ||
+	            [key isEqualToString:@"PayloadAppRules"]        ||
 	            [key isEqualToString:@"PathController"])) {
 
 		NE_LOG("PROBE DECODE: key='%s' obj_class=%s", key.UTF8String, object_getClassName(obj));
@@ -202,37 +183,39 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 }
 
 // ============================================================
-void nehelperInit(void)
-{
-	NE_LOG("nehelperInit() called in process: %s (pid=%d)", getprogname(), getpid());
+// Constructor — called automatically when dylib is loaded
+// ============================================================
 
-	// Scan NEPathController and NEConfiguration methods at runtime
+%ctor {
+	NE_LOG("nehelper hook loaded in process: %s (pid=%d)", getprogname(), getpid());
+
+	// Delayed class method scan (wait for NE classes to initialize)
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
 	               dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 		probeClassMethods(NSClassFromString(@"NEPathController"), "NEPathController");
-		probeClassMethods(NSClassFromString(@"NEConfiguration"), "NEConfiguration");
-		probeClassMethods(NSClassFromString(@"NEPathRule"), "NEPathRule");
+		probeClassMethods(NSClassFromString(@"NEConfiguration"),  "NEConfiguration");
+		probeClassMethods(NSClassFromString(@"NEPathRule"),        "NEPathRule");
 	});
 
-	// -- NSKeyedArchiver focused probes --
+	// Hook NSKeyedArchiver
 	Class archiverClass = objc_getClass("NSKeyedArchiver");
 	if (archiverClass) {
 		MSHookMessageEx(archiverClass,
 		    @selector(encodeObject:forKey:),
 		    (IMP)hook_encode_object_forKey,
 		    (IMP *)&orig_encode_object_forKey);
-		NE_LOG("nehelperInit: NSKeyedArchiver probe installed");
+		NE_LOG("nehelper hook: NSKeyedArchiver probe installed");
 	}
 
-	// -- NSKeyedUnarchiver focused probes --
+	// Hook NSKeyedUnarchiver
 	Class unarchiverClass = objc_getClass("NSKeyedUnarchiver");
 	if (unarchiverClass) {
 		MSHookMessageEx(unarchiverClass,
 		    @selector(decodeObjectForKey:),
 		    (IMP)hook_decode_object_forKey,
 		    (IMP *)&orig_decode_object_forKey);
-		NE_LOG("nehelperInit: NSKeyedUnarchiver probe installed");
+		NE_LOG("nehelper hook: NSKeyedUnarchiver probe installed");
 	}
 
-	NE_LOG("nehelperInit: probes installed, scan will run after 0.5s");
+	NE_LOG("nehelper hook: all probes installed");
 }
