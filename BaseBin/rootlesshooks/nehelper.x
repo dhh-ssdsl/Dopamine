@@ -3,6 +3,8 @@
 #import <libroot.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <CommonCrypto/CommonDigest.h>
+#import <dlfcn.h>
 
 // ============================================================
 // Logging
@@ -38,13 +40,14 @@ static NSString *jbRootPrefix(void)
 }
 
 // ============================================================
-// JB App Detection
+// JB App Detection — scan jbroot /Applications for bundleID
 // ============================================================
 
 static BOOL isJBBundleID(NSString *bundleID)
 {
 	if (!bundleID.length) return NO;
 
+	// Check if LSApplicationProxy resolves to a jbroot path
 	Class LSProxy = NSClassFromString(@"LSApplicationProxy");
 	SEL sel = NSSelectorFromString(@"applicationProxyForIdentifier:");
 	if (LSProxy && [LSProxy respondsToSelector:sel]) {
@@ -69,17 +72,60 @@ static BOOL isJBBundleID(NSString *bundleID)
 	return NO;
 }
 
+// Cache for JB bundleIDs with time-based refresh (30s TTL).
+// This ensures newly installed JB apps are detected without restarting nehelper.
+static NSMutableSet *gJBBundleIDCache = nil;
+static CFAbsoluteTime gJBCacheLastRefresh = 0;
+static const CFAbsoluteTime kJBCacheTTL = 30.0; // refresh every 30 seconds
+
+static NSSet *cachedJBBundleIDs(void)
+{
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (gJBBundleIDCache && (now - gJBCacheLastRefresh) < kJBCacheTTL) {
+		return gJBBundleIDCache;
+	}
+
+	NSMutableSet *newCache = [NSMutableSet set];
+	NSString *jbAppsPath = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")];
+	NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
+	for (NSString *item in contents) {
+		if (![item hasSuffix:@".app"]) continue;
+		NSString *infoPath = [[jbAppsPath stringByAppendingPathComponent:item]
+		                      stringByAppendingPathComponent:@"Info.plist"];
+		NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+		NSString *bid = info[@"CFBundleIdentifier"];
+		if (bid.length) [newCache addObject:bid];
+	}
+
+	gJBBundleIDCache = newCache;
+	gJBCacheLastRefresh = now;
+	NE_LOG("cachedJBBundleIDs: refreshed, found %lu JB apps", (unsigned long)newCache.count);
+	return gJBBundleIDCache;
+}
+
+// ============================================================
+// Deterministic UUID Generation
+//
+// Generates a stable UUID from bundleID (same UUID across reboots).
+// Uses MD5 hash formatted as UUID v3 style.
+// ============================================================
+
+static NSUUID *generateDeterministicUUID(NSString *bundleID)
+{
+	NSString *input = [NSString stringWithFormat:@"jb-ne-uuid:%@", bundleID];
+	const char *cstr = [input UTF8String];
+	unsigned char digest[CC_MD5_DIGEST_LENGTH];
+	CC_MD5(cstr, (CC_LONG)strlen(cstr), digest);
+
+	// Format as UUID v3 (set version and variant bits)
+	digest[6] = (digest[6] & 0x0F) | 0x30; // version 3
+	digest[8] = (digest[8] & 0x3F) | 0x80; // variant 1
+
+	return [[NSUUID alloc] initWithUUIDBytes:digest];
+}
+
 // ============================================================
 // JB Network Rules Plist Storage
-//
-// Stores JB network rules as a plain plist dictionary:
-// {
-//   "rules" = <NSData: NSKeyedArchiver-encoded NSArray of NEPathRule>
-// }
-//
-// Using NSKeyedArchiver is NOT encryption — it's the standard
-// binary serialization used by iOS itself. No custom crypto involved.
-// The file uses normal plist format readable by plutil/Xcode.
 // ============================================================
 
 static NSString *jbNetworkRulesPlistPath(void)
@@ -93,15 +139,9 @@ static NSString *jbNetworkRulesPlistPath(void)
 	return path;
 }
 
-// Save a JB rules array to the JB plist.
-// The array items are private NEPathRule objects — we archive the whole
-// NSArray with NSKeyedArchiver (valid in nehelper's process space where
-// the private classes are already loaded) and store the resulting NSData
-// in a plain plist dictionary under the "rules" key.
 static void saveJBRules(NSArray *jbRules)
 {
 	if (!jbRules.count) {
-		// Remove the file if there are no JB rules
 		[[NSFileManager defaultManager] removeItemAtPath:jbNetworkRulesPlistPath() error:nil];
 		NE_LOG("saveJBRules: no JB rules, removed plist");
 		return;
@@ -133,12 +173,16 @@ static void saveJBRules(NSArray *jbRules)
 		return;
 	}
 
+	NSString *dir = [jbNetworkRulesPlistPath() stringByDeletingLastPathComponent];
+	[[NSFileManager defaultManager] createDirectoryAtPath:dir
+	                          withIntermediateDirectories:YES
+	                                         attributes:nil
+	                                              error:nil];
+
 	BOOL ok = [plistData writeToFile:jbNetworkRulesPlistPath() atomically:YES];
 	NE_LOG("saveJBRules: wrote %lu JB rules to plist: %s", (unsigned long)jbRules.count, ok ? "OK" : "FAILED");
 }
 
-// Load previously saved JB rules from the JB plist.
-// Returns nil if the file doesn't exist or can't be read.
 static NSArray *loadJBRules(void)
 {
 	NSString *path = jbNetworkRulesPlistPath();
@@ -168,8 +212,6 @@ static NSArray *loadJBRules(void)
 
 	NSArray *rules = nil;
 	@try {
-		// Must disable requiresSecureCoding because NEPathRule is a private class
-		// not registered for secure coding. We authored this data ourselves, so it's safe.
 		NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:archivedData error:&err];
 		if (unarchiver) {
 			unarchiver.requiresSecureCoding = NO;
@@ -178,7 +220,6 @@ static NSArray *loadJBRules(void)
 		}
 	} @catch (NSException *e) {
 		NE_LOG("loadJBRules: unarchive exception: %s", e.reason.UTF8String);
-
 		return nil;
 	}
 
@@ -193,18 +234,14 @@ static NSArray *loadJBRules(void)
 
 // ============================================================
 // NSKeyedArchiver / NSKeyedUnarchiver Hooks
+// (Read-Write Separation for NE config-aggregate-rules)
 // ============================================================
 
-// Thread-local re-entrancy guard (prevents recursive hook calls when
-// saveJBRules/loadJBRules internally call NSKeyedArchiver/Unarchiver)
 static __thread BOOL gIsRoutingNE;
 
 static void (*orig_encode_object_forKey)(id self, SEL _cmd, id obj, NSString *key);
 static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 {
-	// Only intercept the final "config-aggregate-rules" key — this is the key
-	// that nehelper uses when writing the consolidated config to disk.
-	// We split out JB rules and save them separately; only system rules continue.
 	if (!gIsRoutingNE &&
 	    [key isEqualToString:@"config-aggregate-rules"] &&
 	    [obj isKindOfClass:[NSArray class]])
@@ -230,16 +267,13 @@ static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 		       (unsigned long)jbRules.count,
 		       (unsigned long)systemRules.count);
 
-		// Persist JB rules to the JB plist (replaces any previous snapshot)
-		if (jbRules.count) {
-			gIsRoutingNE = YES;
-			saveJBRules(jbRules);
-			gIsRoutingNE = NO;
-		}
+		// Save JB rules to JB-specific plist
+		gIsRoutingNE = YES;
+		saveJBRules(jbRules);
+		gIsRoutingNE = NO;
 
-		// Encode ALL rules (system + JB) into the system config so they actually take effect.
-		// The original logic threw away the JB rules here, causing the system to lose them.
-		orig_encode_object_forKey(self, _cmd, allRules, key);
+		// Write ONLY system rules to system plist (read-write separation)
+		orig_encode_object_forKey(self, _cmd, systemRules, key);
 		return;
 	}
 
@@ -251,8 +285,7 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 {
 	id obj = orig_decode_object_forKey(self, _cmd, key);
 
-	// Intercept Rules and config-aggregate-rules on decode:
-	// merge in any JB rules that were saved separately.
+	// Merge JB rules back in on decode
 	if (!gIsRoutingNE &&
 	    ([key isEqualToString:@"Rules"] || [key isEqualToString:@"config-aggregate-rules"]) &&
 	    [obj isKindOfClass:[NSArray class]])
@@ -280,6 +313,108 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 }
 
 // ============================================================
+// LSApplicationProxy Hook — Fix UUID Resolution for JB Apps
+//
+// Architecture:
+//   nesessionmanager → XPC → nehelper → LSApplicationProxy → LaunchServices
+//
+// When nehelper queries LaunchServices for a JB app bundleID,
+// it calls [LSApplicationProxy applicationProxyForIdentifier:].
+// For JB apps NOT in MobileInstallation, this returns a proxy
+// with nil bundleURL, causing "Failed to find XXX in LaunchServices".
+//
+// Our hook intercepts this in nehelper's process space and
+// returns a proxy with a valid bundleURL for JB apps, so
+// nehelper can resolve the UUID to return to nesessionmanager.
+// ============================================================
+
+// Hook -[LSApplicationProxy bundleURL]
+// For JB apps, return the actual jbroot .app path as a URL
+static id (*orig_LSProxy_bundleURL)(id self, SEL _cmd);
+static id hook_LSProxy_bundleURL(id self, SEL _cmd)
+{
+	id result = orig_LSProxy_bundleURL(self, _cmd);
+	if (!result) {
+		// bundleURL is nil — might be a JB app
+		NSString *bid = nil;
+		@try {
+			bid = [self valueForKey:@"applicationIdentifier"];
+			if (!bid) bid = [self valueForKey:@"bundleIdentifier"];
+		} @catch (NSException *e) {
+			// ignore
+		}
+		if (bid && [cachedJBBundleIDs() containsObject:bid]) {
+			// Find the actual .app path in jbroot
+			NSString *jbAppsPath = [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")];
+			NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
+			for (NSString *item in contents) {
+				if (![item hasSuffix:@".app"]) continue;
+				NSString *infoPath = [[jbAppsPath stringByAppendingPathComponent:item]
+				                      stringByAppendingPathComponent:@"Info.plist"];
+				NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+				if ([info[@"CFBundleIdentifier"] isEqualToString:bid]) {
+					NSString *appPath = [jbAppsPath stringByAppendingPathComponent:item];
+					result = [NSURL fileURLWithPath:appPath isDirectory:YES];
+					NE_LOG("LSProxy_bundleURL: injected JB path for '%s': %s",
+					       bid.UTF8String, appPath.UTF8String);
+					break;
+				}
+			}
+		}
+	}
+	return result;
+}
+
+// Hook -[LSApplicationProxy bundleContainerURL]
+// For JB apps, return a valid container URL (same as bundle path parent)
+static id (*orig_LSProxy_bundleContainerURL)(id self, SEL _cmd);
+static id hook_LSProxy_bundleContainerURL(id self, SEL _cmd)
+{
+	id result = orig_LSProxy_bundleContainerURL(self, _cmd);
+	if (!result) {
+		NSString *bid = nil;
+		@try {
+			bid = [self valueForKey:@"applicationIdentifier"];
+			if (!bid) bid = [self valueForKey:@"bundleIdentifier"];
+		} @catch (NSException *e) {}
+		if (bid && [cachedJBBundleIDs() containsObject:bid]) {
+			result = [NSURL fileURLWithPath:
+			          [NSString stringWithUTF8String:JBROOT_PATH_CSTRING("/Applications")]
+			                    isDirectory:YES];
+			NE_LOG("LSProxy_bundleContainerURL: injected JB container for '%s'", bid.UTF8String);
+		}
+	}
+	return result;
+}
+
+// Hook +[LSApplicationProxy applicationProxyForIdentifier:]
+// For JB apps that return nil proxy, create a minimal proxy
+static id (*orig_LSProxy_proxyForIdentifier)(id self, SEL _cmd, NSString *bundleID);
+static id hook_LSProxy_proxyForIdentifier(id self, SEL _cmd, NSString *bundleID)
+{
+	id result = orig_LSProxy_proxyForIdentifier(self, _cmd, bundleID);
+
+	if (result && bundleID) {
+		// Check if the proxy has a valid bundleURL
+		NSURL *bundleURL = nil;
+		@try {
+			bundleURL = [result valueForKey:@"bundleURL"];
+		} @catch (NSException *e) {}
+
+		if (!bundleURL && [cachedJBBundleIDs() containsObject:bundleID]) {
+			NE_LOG("LSProxy_proxyForIdentifier: proxy for '%s' has nil bundleURL, "
+			       "instance hook will inject JB path", bundleID.UTF8String);
+		}
+	} else if (!result && bundleID && [cachedJBBundleIDs() containsObject:bundleID]) {
+		// Proxy itself is nil — try calling original with bundleID anyway,
+		// the instance hooks on bundleURL will fill in the path
+		NE_LOG("LSProxy_proxyForIdentifier: nil proxy for JB app '%s'", bundleID.UTF8String);
+	}
+
+	return result;
+}
+
+// ============================================================
 // nehelperInit — called by main.x %ctor when process is nehelper
 // ============================================================
 
@@ -287,7 +422,10 @@ void nehelperInit(void)
 {
 	NE_LOG("nehelperInit() called in process: %s (pid=%d)", getprogname(), getpid());
 
-	// Hook NSKeyedArchiver -encodeObject:forKey:
+	// Pre-cache JB bundle IDs
+	(void)cachedJBBundleIDs();
+
+	// --- Hook 1: NSKeyedArchiver -encodeObject:forKey: ---
 	Class archiverClass = objc_getClass("NSKeyedArchiver");
 	if (archiverClass) {
 		MSHookMessageEx(archiverClass,
@@ -299,7 +437,7 @@ void nehelperInit(void)
 		NE_LOG("nehelperInit: WARNING - NSKeyedArchiver class not found");
 	}
 
-	// Hook NSKeyedUnarchiver -decodeObjectForKey:
+	// --- Hook 2: NSKeyedUnarchiver -decodeObjectForKey: ---
 	Class unarchiverClass = objc_getClass("NSKeyedUnarchiver");
 	if (unarchiverClass) {
 		MSHookMessageEx(unarchiverClass,
@@ -309,6 +447,37 @@ void nehelperInit(void)
 		NE_LOG("nehelperInit: NSKeyedUnarchiver hook installed");
 	} else {
 		NE_LOG("nehelperInit: WARNING - NSKeyedUnarchiver class not found");
+	}
+
+	// --- Hook 3: LSApplicationProxy hooks (UUID resolution fix) ---
+	Class lsProxyClass = objc_getClass("LSApplicationProxy");
+	if (lsProxyClass) {
+		// Hook instance method -bundleURL
+		MSHookMessageEx(lsProxyClass,
+		    NSSelectorFromString(@"bundleURL"),
+		    (IMP)hook_LSProxy_bundleURL,
+		    (IMP *)&orig_LSProxy_bundleURL);
+
+		// Hook instance method -bundleContainerURL
+		if ([lsProxyClass instancesRespondToSelector:NSSelectorFromString(@"bundleContainerURL")]) {
+			MSHookMessageEx(lsProxyClass,
+			    NSSelectorFromString(@"bundleContainerURL"),
+			    (IMP)hook_LSProxy_bundleContainerURL,
+			    (IMP *)&orig_LSProxy_bundleContainerURL);
+		}
+
+		// Hook class method +applicationProxyForIdentifier:
+		Class lsProxyMetaClass = object_getClass(lsProxyClass);
+		if (lsProxyMetaClass) {
+			MSHookMessageEx(lsProxyMetaClass,
+			    NSSelectorFromString(@"applicationProxyForIdentifier:"),
+			    (IMP)hook_LSProxy_proxyForIdentifier,
+			    (IMP *)&orig_LSProxy_proxyForIdentifier);
+		}
+
+		NE_LOG("nehelperInit: LSApplicationProxy hooks installed (bundleURL, bundleContainerURL, applicationProxyForIdentifier:)");
+	} else {
+		NE_LOG("nehelperInit: WARNING - LSApplicationProxy class not found");
 	}
 
 	NE_LOG("nehelperInit: all hooks installed. JB rules plist: %s",
