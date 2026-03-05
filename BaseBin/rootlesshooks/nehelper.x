@@ -222,7 +222,7 @@ static void (*orig_encode_object_forKey)(id self, SEL _cmd, id obj, NSString *ke
 static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 {
 	if (!gIsRoutingNE &&
-	    [key isEqualToString:@"config-aggregate-rules"] &&
+	    ([key isEqualToString:@"config-aggregate-rules"] || [key isEqualToString:@"Rules"]) &&
 	    [obj isKindOfClass:[NSArray class]])
 	{
 		NSArray *allRules = (NSArray *)obj;
@@ -241,7 +241,8 @@ static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 			}
 		}
 
-		NE_LOG("ENCODE config-aggregate-rules: total=%lu, JB=%lu, system=%lu",
+		NE_LOG("ENCODE %s: total=%lu, JB=%lu, system=%lu",
+		       key.UTF8String,
 		       (unsigned long)allRules.count,
 		       (unsigned long)jbRules.count,
 		       (unsigned long)systemRules.count);
