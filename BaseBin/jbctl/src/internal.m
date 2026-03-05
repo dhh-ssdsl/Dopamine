@@ -181,6 +181,7 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 			const char *wirelessDir = JBROOT_PATH("/var/wireless");
 			const char *wirelessLibraryDir = JBROOT_PATH("/var/wireless/Library");
 			const char *wirelessDbDir = JBROOT_PATH("/var/wireless/Library/Databases");
+			const char *wirelessCellularDbPath = JBROOT_PATH("/var/wireless/Library/Databases/CellularUsage.db");
 			const char *wirelessPaths[] = { wirelessDir, wirelessLibraryDir, wirelessDbDir };
 			struct passwd *pw = getpwnam("_wireless");
 
@@ -198,6 +199,15 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 					chown(path, pw->pw_uid, pw->pw_gid);
 					chmod(path, 0755);
 				}
+			}
+
+			// Pre-create the JB mirror cellular DB so CommCenter can ATTACH it
+			// even on first boot before any routing write path has run.
+			int dbfd = open(wirelessCellularDbPath, O_CREAT | O_RDWR, 0644);
+			if (dbfd >= 0) close(dbfd);
+			if (pw) {
+				chown(wirelessCellularDbPath, pw->pw_uid, pw->pw_gid);
+				chmod(wirelessCellularDbPath, 0644);
 			}
 		}
 		char *panicMessage = NULL;
