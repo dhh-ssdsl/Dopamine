@@ -55,6 +55,8 @@ BOOL preferencePlistNeedsRedirection(NSString *plistPath)
 		if (needsRedirection) {
 			char mirroredPath[PATH_MAX];
 			if (perm_jb_mirror_path_c(origPath.UTF8String, mirroredPath, sizeof(mirroredPath)) == 0) {
+				NSString *mirroredPathNS = [NSString stringWithUTF8String:mirroredPath];
+				perm_ensure_parent_dir_for_path(mirroredPathNS);
 				strlcpy((char *)buffer, mirroredPath, PATH_MAX);
 			}
 		}

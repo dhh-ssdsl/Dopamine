@@ -15,6 +15,20 @@ static NSString *perm_normalize_prefix(NSString *prefix)
 	return prefix;
 }
 
+static NSString *perm_normalize_system_path(NSString *systemPath)
+{
+	if (!systemPath.length) return systemPath;
+
+	// iOS often reports the same path as either /var/... or /private/var/...
+	// Mirror routing should treat them as the same system location.
+	static NSString *privateVarPrefix = @"/private/var/";
+	if ([systemPath hasPrefix:privateVarPrefix]) {
+		return [@"/var/" stringByAppendingString:[systemPath substringFromIndex:privateVarPrefix.length]];
+	}
+
+	return systemPath;
+}
+
 NSString *perm_jb_root_prefix_ns(void)
 {
 	static NSString *prefix = nil;
@@ -50,24 +64,27 @@ NSString *perm_jb_mirror_path_ns(NSString *systemPath)
 {
 	if (!systemPath.length) return nil;
 	if (![systemPath hasPrefix:@"/"]) return systemPath;
+
+	NSString *normalizedSystemPath = perm_normalize_system_path(systemPath);
+	if (perm_is_path_under_jbroot(normalizedSystemPath)) return normalizedSystemPath;
 	if (perm_is_path_under_jbroot(systemPath)) return systemPath;
 
 #ifdef JBROOT_PATH_NSSTRING
-	NSString *mirrored = JBROOT_PATH_NSSTRING(systemPath);
+	NSString *mirrored = JBROOT_PATH_NSSTRING(normalizedSystemPath);
 	if (mirrored.length) return mirrored;
 #endif
 
 #ifndef JBROOT_PATH_NSSTRING
 #ifdef JBROOT_PATH
-	NSString *mirrored = JBROOT_PATH(systemPath);
+	NSString *mirrored = JBROOT_PATH(normalizedSystemPath);
 	if (mirrored.length) return mirrored;
 #endif
 #endif
 
 	NSString *prefix = perm_jb_root_prefix_ns();
 	if (!prefix.length) return nil;
-	if ([prefix isEqualToString:@"/"]) return systemPath;
-	return [prefix stringByAppendingString:systemPath];
+	if ([prefix isEqualToString:@"/"]) return normalizedSystemPath;
+	return [prefix stringByAppendingString:normalizedSystemPath];
 }
 
 int perm_jb_mirror_path_c(const char *systemPath, char *outPath, size_t outSize)
