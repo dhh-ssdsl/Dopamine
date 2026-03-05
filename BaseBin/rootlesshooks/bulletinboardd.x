@@ -125,18 +125,6 @@ static void performSplitOnWrite(NSData *data, NSString *path, BOOL (^writeOrigin
 		NSMutableDictionary *jbSection = [NSMutableDictionary dictionary];
 		splitSectionInfoByBundle(sectionInfo, systemSection, jbSection);
 
-		// SpringBoard early writes can temporarily miss JB entries.
-		// Preserve already-split JB records so permissions are not lost across reboot.
-		NSDictionary *savedJBDict = loadPlistDict(jbNotificationPlistPath());
-		NSDictionary *savedJBSection = savedJBDict[@"sectionInfo"];
-		if ([savedJBSection isKindOfClass:[NSDictionary class]]) {
-			for (NSString *bundleID in savedJBSection) {
-				if (!jbSection[bundleID]) {
-					jbSection[bundleID] = savedJBSection[bundleID];
-				}
-			}
-		}
-
 		NSMutableDictionary *systemWriteDict = [fullDict mutableCopy];
 		systemWriteDict[@"sectionInfo"] = systemSection;
 		NSData *systemWriteData = serializePlist(systemWriteDict, format);
@@ -155,7 +143,10 @@ static void performSplitOnWrite(NSData *data, NSString *path, BOOL (^writeOrigin
 				[jbData writeToFile:jbNotificationPlistPath() atomically:YES];
 			}
 		} else {
-			[[NSFileManager defaultManager] removeItemAtPath:jbNotificationPlistPath() error:nil];
+			// Startup races can produce a transient jb=0 write; keep last JB mirror instead of deleting it.
+			if ([[NSFileManager defaultManager] fileExistsAtPath:jbNotificationPlistPath()]) {
+				BB_LOG("write split (VersionedSectionInfo): jb=0, keep existing JB mirror");
+			}
 		}
 
 		BB_LOG("write split (VersionedSectionInfo): system=%lu jb=%lu",
@@ -169,15 +160,6 @@ static void performSplitOnWrite(NSData *data, NSString *path, BOOL (^writeOrigin
 		NSMutableDictionary *jbEntries = [NSMutableDictionary dictionary];
 		splitClearedSectionsByBundle(fullDict, systemEntries, jbEntries);
 
-		NSDictionary *savedJB = loadPlistDict(jbClearedSectionsPath());
-		if ([savedJB isKindOfClass:[NSDictionary class]]) {
-			for (NSString *bundleID in savedJB) {
-				if (!jbEntries[bundleID]) {
-					jbEntries[bundleID] = savedJB[bundleID];
-				}
-			}
-		}
-
 		NSData *systemWriteData = serializePlist(systemEntries, format);
 		if (systemWriteData) {
 			writeOriginal(systemWriteData, path);
@@ -190,7 +172,9 @@ static void performSplitOnWrite(NSData *data, NSString *path, BOOL (^writeOrigin
 			NSData *jbData = serializePlist(jbEntries, format);
 			if (jbData) [jbData writeToFile:jbClearedSectionsPath() atomically:YES];
 		} else {
-			[[NSFileManager defaultManager] removeItemAtPath:jbClearedSectionsPath() error:nil];
+			if ([[NSFileManager defaultManager] fileExistsAtPath:jbClearedSectionsPath()]) {
+				BB_LOG("write split (ClearedSections): jb=0, keep existing JB mirror");
+			}
 		}
 
 		BB_LOG("write split (ClearedSections): system=%lu jb=%lu",
