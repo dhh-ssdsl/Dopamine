@@ -1,9 +1,16 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
+#import <limits.h>
+#import <string.h>
+#import "perm_router.h"
 
 BOOL preferencePlistNeedsRedirection(NSString *plistPath)
 {
-	if ([plistPath hasPrefix:@"/private/var/mobile/Containers"] || [plistPath hasPrefix:@"/var/db"] || [plistPath hasPrefix:@"/var/jb"]) return NO;
+	if ([plistPath hasPrefix:@"/private/var/mobile/Containers"] ||
+	    [plistPath hasPrefix:@"/var/db"] ||
+	    perm_is_path_under_jbroot(plistPath)) {
+		return NO;
+	}
 
 	NSString *plistName = plistPath.lastPathComponent;
 
@@ -41,14 +48,15 @@ BOOL preferencePlistNeedsRedirection(NSString *plistPath)
 {
 	BOOL orig = %orig(bundleIdentifier, user, byHost, path, buffer);
 
-	if(orig && buffer && !access("/var/jb", F_OK))
+	if(orig && buffer)
 	{
 		NSString* origPath = [NSString stringWithUTF8String:(char*)buffer];
 		BOOL needsRedirection = preferencePlistNeedsRedirection(origPath);
 		if (needsRedirection) {
-			//NSLog(@"Plist redirected to /var/jb: %@", origPath);
-			strcpy((char*)buffer, "/var/jb");
-			strcat((char*)buffer, origPath.UTF8String);
+			char mirroredPath[PATH_MAX];
+			if (perm_jb_mirror_path_c(origPath.UTF8String, mirroredPath, sizeof(mirroredPath)) == 0) {
+				strlcpy((char *)buffer, mirroredPath, PATH_MAX);
+			}
 		}
 	}
 
