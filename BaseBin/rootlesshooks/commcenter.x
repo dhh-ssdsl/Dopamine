@@ -4,6 +4,9 @@
 #import <limits.h>
 #import <libroot.h>
 #import <string.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <errno.h>
 #import "perm_router.h"
 
 // sqlite3_db_filename is available on iOS 6+.
@@ -147,6 +150,21 @@ static BOOL ensureJBCellularAttached(sqlite3 *db)
 		}
 	}
 	return YES;
+}
+
+static void ensureJBCellularFileExists(void)
+{
+	if (!gJBCellularPath.length) return;
+
+	int fd = open(gJBCellularPath.fileSystemRepresentation, O_CREAT | O_RDWR, 0644);
+	if (fd >= 0) {
+		close(fd);
+		return;
+	}
+
+	CC_LOG("ensureJBCellularFileExists: open failed errno=%d path=%s",
+	       errno,
+	       gJBCellularPath.UTF8String ?: "(null)");
 }
 
 static void migrateCellularRowsIfNeeded(sqlite3 *db)
@@ -317,6 +335,7 @@ static void setupCellularDB(sqlite3 *db, const char *filename)
 	}
 
 	perm_ensure_parent_dir_for_path(gJBCellularPath);
+	ensureJBCellularFileExists();
 	migrateLegacyJBCellularDBIfNeeded(gJBCellularPath);
 
 	sqlite3_create_function(db,
@@ -366,6 +385,10 @@ static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sql
 		} else {
 			return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
 		}
+	}
+
+	if (db != gCellularDB || !gRoutingReady) {
+		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
 	}
 
 	NSString *sql = [NSString stringWithUTF8String:zSql];

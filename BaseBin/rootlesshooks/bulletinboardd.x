@@ -125,6 +125,18 @@ static void performSplitOnWrite(NSData *data, NSString *path, BOOL (^writeOrigin
 		NSMutableDictionary *jbSection = [NSMutableDictionary dictionary];
 		splitSectionInfoByBundle(sectionInfo, systemSection, jbSection);
 
+		// SpringBoard early writes can temporarily miss JB entries.
+		// Preserve already-split JB records so permissions are not lost across reboot.
+		NSDictionary *savedJBDict = loadPlistDict(jbNotificationPlistPath());
+		NSDictionary *savedJBSection = savedJBDict[@"sectionInfo"];
+		if ([savedJBSection isKindOfClass:[NSDictionary class]]) {
+			for (NSString *bundleID in savedJBSection) {
+				if (!jbSection[bundleID]) {
+					jbSection[bundleID] = savedJBSection[bundleID];
+				}
+			}
+		}
+
 		NSMutableDictionary *systemWriteDict = [fullDict mutableCopy];
 		systemWriteDict[@"sectionInfo"] = systemSection;
 		NSData *systemWriteData = serializePlist(systemWriteDict, format);
@@ -156,6 +168,15 @@ static void performSplitOnWrite(NSData *data, NSString *path, BOOL (^writeOrigin
 		NSMutableDictionary *systemEntries = [NSMutableDictionary dictionary];
 		NSMutableDictionary *jbEntries = [NSMutableDictionary dictionary];
 		splitClearedSectionsByBundle(fullDict, systemEntries, jbEntries);
+
+		NSDictionary *savedJB = loadPlistDict(jbClearedSectionsPath());
+		if ([savedJB isKindOfClass:[NSDictionary class]]) {
+			for (NSString *bundleID in savedJB) {
+				if (!jbEntries[bundleID]) {
+					jbEntries[bundleID] = savedJB[bundleID];
+				}
+			}
+		}
 
 		NSData *systemWriteData = serializePlist(systemEntries, format);
 		if (systemWriteData) {
