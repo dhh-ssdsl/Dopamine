@@ -363,7 +363,12 @@ __attribute__((constructor)) static void initializer(void)
 			!strcmp(gExecutablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ||
 			!strcmp(gExecutablePath, "/usr/libexec/lsd") ||
 			!strcmp(gExecutablePath, "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd") ||
-			!strcmp(gExecutablePath, "/usr/libexec/nehelper")) {
+			!strcmp(gExecutablePath, "/usr/libexec/nehelper") ||
+			!strcmp(gExecutablePath, "/usr/libexec/symptomsd") ||
+			!strcmp(gExecutablePath, "/usr/libexec/networkd") ||
+			!strcmp(gExecutablePath, "/usr/libexec/nesessionmanager") ||
+			string_has_suffix(gExecutablePath, "/CommCenter") ||
+			string_has_suffix(gExecutablePath, "/CommCenterMobileHelper")) {
 			dlopen(JBROOT_PATH("/basebin/rootlesshooks.dylib"), RTLD_NOW);
 		}
 		else if (!strcmp(gExecutablePath, "/usr/libexec/watchdogd")) {
@@ -374,7 +379,7 @@ __attribute__((constructor)) static void initializer(void)
 		// e.g. allows attaching debugserver to an app where tweak injection has been disabled via choicy
 		// since we want to keep hooks minimal and debugserver is the only thing I can think of that would
 		// call ptrace and expect it to allow invalid pages, we only hook it in debugserver
-		// this check is a bit shit since we rely on the name of the binary, but who cares ¯\_(ツ)_/¯
+		// this check relies on the executable name, which is acceptable here
 		if (string_has_suffix(gExecutablePath, "/debugserver")) {
 			litehook_hook_function(ptrace, ptrace_hook);
 		}

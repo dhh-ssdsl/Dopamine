@@ -178,16 +178,26 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 		// Ensure the JB-side directory for CommCenter cellular routing exists
 		// and is owned by _wireless. Must be done as root before CommCenter starts.
 		{
+			const char *wirelessDir = JBROOT_PATH("/var/wireless");
+			const char *wirelessLibraryDir = JBROOT_PATH("/var/wireless/Library");
 			const char *wirelessDbDir = JBROOT_PATH("/var/wireless/Library/Databases");
-			struct stat st;
-			if (stat(wirelessDbDir, &st) != 0) {
+			const char *wirelessPaths[] = { wirelessDir, wirelessLibraryDir, wirelessDbDir };
+			struct passwd *pw = getpwnam("_wireless");
+
+			for (size_t i = 0; i < sizeof(wirelessPaths) / sizeof(wirelessPaths[0]); i++) {
+				const char *path = wirelessPaths[i];
 				[[NSFileManager defaultManager]
-					createDirectoryAtPath:[NSString stringWithUTF8String:wirelessDbDir]
+					createDirectoryAtPath:[NSString stringWithUTF8String:path]
 					withIntermediateDirectories:YES
 					attributes:nil
 					error:nil];
-				struct passwd *pw = getpwnam("_wireless");
-				if (pw) chown(wirelessDbDir, pw->pw_uid, pw->pw_gid);
+
+				// Existing directories may already be present with root ownership.
+				// Always repair owner/mode so CommCenter (_wireless) can create/open db files.
+				if (pw) {
+					chown(path, pw->pw_uid, pw->pw_gid);
+					chmod(path, 0755);
+				}
 			}
 		}
 		char *panicMessage = NULL;

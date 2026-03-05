@@ -39,11 +39,16 @@ NSString* getProcessName()
 		extern void tccdInit(void);
 		tccdInit();
 	}
-	else if ([processName isEqualToString:@"CommCenter"] || [processName isEqualToString:@"CommCenterMobileHelper"]) {
+	else if ([processName hasPrefix:@"CommCenter"]) {
 		extern void commcenterInit(void);
 		commcenterInit();
+		extern void nehelperInit(void);
+		nehelperInit();
 	}
-	else if ([processName isEqualToString:@"nehelper"] || [processName isEqualToString:@"symptomsd"] || [processName isEqualToString:@"networkd"]) {
+	else if ([processName isEqualToString:@"nehelper"] ||
+	         [processName isEqualToString:@"symptomsd"] ||
+	         [processName isEqualToString:@"networkd"] ||
+	         [processName isEqualToString:@"nesessionmanager"]) {
 		extern void nehelperInit(void);
 		nehelperInit();
 	}
