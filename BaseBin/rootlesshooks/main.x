@@ -1,21 +1,27 @@
 #import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
+#import <stdlib.h>
 
 NSString* safe_getExecutablePath()
 {
 	char executablePathC[PATH_MAX];
 	uint32_t executablePathCSize = sizeof(executablePathC);
-	_NSGetExecutablePath(&executablePathC[0], &executablePathCSize);
-	return [NSString stringWithUTF8String:executablePathC];
+	if (_NSGetExecutablePath(&executablePathC[0], &executablePathCSize) == 0) {
+		return [NSString stringWithUTF8String:executablePathC];
+	}
+	const char *progName = getprogname();
+	return progName ? [NSString stringWithUTF8String:progName] : @"";
 }
 
 NSString* getProcessName()
 {
-	return safe_getExecutablePath().lastPathComponent;
+	NSString *exePath = safe_getExecutablePath();
+	return exePath.lastPathComponent ?: exePath;
 }
 
 %ctor
 {
+	NSString *executablePath = safe_getExecutablePath();
 	NSString *processName = getProcessName();
 	/*if ([processName isEqualToString:@"installd"]) {
 		extern void installdInit(void);
@@ -39,7 +45,10 @@ NSString* getProcessName()
 		extern void tccdInit(void);
 		tccdInit();
 	}
-	else if ([processName hasPrefix:@"CommCenter"]) {
+	else if ([processName hasPrefix:@"CommCenter"] ||
+	         [executablePath isEqualToString:@"/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter"] ||
+	         [executablePath isEqualToString:@"/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenterMobileHelper"] ||
+	         [executablePath containsString:@"/CommCenter"]) {
 		extern void commcenterInit(void);
 		commcenterInit();
 		extern void nehelperInit(void);

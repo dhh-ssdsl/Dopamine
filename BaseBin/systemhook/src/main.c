@@ -7,6 +7,9 @@
 #include <sys/stat.h>
 #include <paths.h>
 #include <util.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <time.h>
 #include <string.h>
 #include <ptrauth.h>
 #include <libjailbreak/jbclient_xpc.h>
@@ -23,6 +26,28 @@ char *JB_BootUUID = NULL;
 char *JB_RootPath = NULL;
 char *get_jbroot(void) { return JB_RootPath; }
 __attribute__((used)) static const char *kSystemhookBuildTag = "SYSTEMHOOK_CC_INJECT_20260305_1";
+
+static void sh_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void sh_log(const char *fmt, ...)
+{
+	FILE *f = fopen(JBROOT_PATH("/var/mobile/hook_debug.log"), "a");
+	if (!f) {
+		f = fopen(JBROOT_PATH("/var/wireless/Library/Preferences/hook_debug.log"), "a");
+	}
+	if (!f) return;
+
+	time_t t = time(NULL);
+	struct tm tm;
+	localtime_r(&t, &tm);
+	fprintf(f, "%02d:%02d:%02d [systemhook] ", tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(f, fmt, ap);
+	va_end(ap);
+	fprintf(f, "\n");
+	fclose(f);
+}
 
 static char gExecutablePath[PATH_MAX];
 static int load_executable_path(void)
@@ -296,6 +321,17 @@ int parse_dyldhook_jbinfo(char **jbRootPathOut, char **bootUUIDOut, char **sandb
 	return 0;
 }
 
+static bool process_path_matches(const char *expectedPath)
+{
+	return expectedPath && gExecutablePath[0] != '\0' && !strcmp(gExecutablePath, expectedPath);
+}
+
+static bool process_name_matches(const char *expectedName)
+{
+	const char *prog = getprogname();
+	return expectedName && prog && !strcmp(prog, expectedName);
+}
+
 __attribute__((constructor)) static void initializer(void)
 {	
 	// Under normal circumstances, dyldhook will have already handled the check-in, so get the check-in information from the __jbinfo section
@@ -364,8 +400,15 @@ __attribute__((constructor)) static void initializer(void)
 #endif
 
 	if (load_executable_path() == 0) {
-		// Load rootlesshooks / watchdoghook when neccessary
-		if (!strcmp(gExecutablePath, "/usr/sbin/cfprefsd") ||
+		bool isCommCenterProcess =
+			process_path_matches("/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter") ||
+			process_path_matches("/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenterMobileHelper") ||
+			process_name_matches("CommCenter") ||
+			process_name_matches("CommCenterMobileHelper") ||
+			(strstr(gExecutablePath, "/CommCenter") != NULL);
+
+		bool shouldLoadRootlesshooks =
+			!strcmp(gExecutablePath, "/usr/sbin/cfprefsd") ||
 			!strcmp(gExecutablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ||
 			!strcmp(gExecutablePath, "/usr/libexec/lsd") ||
 			!strcmp(gExecutablePath, "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd") ||
@@ -373,10 +416,28 @@ __attribute__((constructor)) static void initializer(void)
 			!strcmp(gExecutablePath, "/usr/libexec/symptomsd") ||
 			!strcmp(gExecutablePath, "/usr/libexec/networkd") ||
 			!strcmp(gExecutablePath, "/usr/libexec/nesessionmanager") ||
-			strstr(gExecutablePath, "/CommCenter") != NULL ||
+			process_path_matches("/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter") ||
+			process_path_matches("/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenterMobileHelper") ||
+			process_name_matches("CommCenter") ||
+			process_name_matches("CommCenterMobileHelper") ||
+			(strstr(gExecutablePath, "/CommCenter") != NULL) ||
 			string_has_suffix(gExecutablePath, "/CommCenter") ||
-			string_has_suffix(gExecutablePath, "/CommCenterMobileHelper")) {
-			dlopen(JBROOT_PATH("/basebin/rootlesshooks.dylib"), RTLD_NOW);
+			string_has_suffix(gExecutablePath, "/CommCenterMobileHelper");
+
+		if (isCommCenterProcess) {
+			const char *progName = getprogname();
+			sh_log("process=%s prog=%s shouldLoadRootlesshooks=%d",
+			       gExecutablePath,
+			       progName ? progName : "(null)",
+			       shouldLoadRootlesshooks);
+		}
+
+		// Load rootlesshooks / watchdoghook when neccessary
+		if (shouldLoadRootlesshooks) {
+			void *h = dlopen(JBROOT_PATH("/basebin/rootlesshooks.dylib"), RTLD_NOW);
+			if (isCommCenterProcess) {
+				sh_log("dlopen(rootlesshooks)=%p", h);
+			}
 		}
 		else if (!strcmp(gExecutablePath, "/usr/libexec/watchdogd")) {
 			dlopen(JBROOT_PATH("/basebin/watchdoghook.dylib"), RTLD_NOW);
