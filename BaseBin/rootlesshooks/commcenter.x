@@ -435,7 +435,20 @@ static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*
 
 void commcenterInit(void)
 {
-	CC_LOG("commcenterInit() called in process: %s (pid=%d)", getprogname(), getpid());
+	CC_LOG("commcenterInit() called in process: %s (pid=%d uid=%d gid=%d)",
+	       getprogname(),
+	       getpid(),
+	       getuid(),
+	       getgid());
+
+	NSString *preflightMirror = perm_jb_mirror_path_ns(@"/var/wireless/Library/Databases/CellularUsage.db");
+	if (preflightMirror.length) {
+		gJBCellularPath = preflightMirror;
+		perm_ensure_parent_dir_for_path(gJBCellularPath);
+		ensureJBCellularFileExists();
+		CC_LOG("commcenterInit preflight: mirror=%s", gJBCellularPath.UTF8String ?: "(null)");
+	}
+
 	MSHookFunction(sqlite3_open, (void *)hook_sqlite3_open, (void **)&orig_sqlite3_open);
 	MSHookFunction(sqlite3_open_v2, (void *)hook_sqlite3_open_v2, (void **)&orig_sqlite3_open_v2);
 	MSHookFunction(sqlite3_prepare_v2, (void *)hook_sqlite3_prepare_v2, (void **)&orig_sqlite3_prepare_v2);

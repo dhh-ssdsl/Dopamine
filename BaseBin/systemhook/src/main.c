@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <paths.h>
 #include <util.h>
+#include <string.h>
 #include <ptrauth.h>
 #include <libjailbreak/jbclient_xpc.h>
 #include <libjailbreak/codesign.h>
@@ -21,6 +22,7 @@ static void *gLibSandboxHandle;
 char *JB_BootUUID = NULL;
 char *JB_RootPath = NULL;
 char *get_jbroot(void) { return JB_RootPath; }
+__attribute__((used)) static const char *kSystemhookBuildTag = "SYSTEMHOOK_CC_INJECT_20260305_1";
 
 static char gExecutablePath[PATH_MAX];
 static int load_executable_path(void)
@@ -29,6 +31,10 @@ static int load_executable_path(void)
 	uint32_t bufsize = PATH_MAX;
 	if (_NSGetExecutablePath(executablePath, &bufsize) == 0) {
 		if (realpath(executablePath, gExecutablePath) != NULL) return 0;
+		// Some daemons may fail realpath() early in bootstrap; keep the original
+		// executable path so process matching can still run.
+		strlcpy(gExecutablePath, executablePath, sizeof(gExecutablePath));
+		return 0;
 	}
 	return -1;
 }
@@ -367,6 +373,7 @@ __attribute__((constructor)) static void initializer(void)
 			!strcmp(gExecutablePath, "/usr/libexec/symptomsd") ||
 			!strcmp(gExecutablePath, "/usr/libexec/networkd") ||
 			!strcmp(gExecutablePath, "/usr/libexec/nesessionmanager") ||
+			strstr(gExecutablePath, "/CommCenter") != NULL ||
 			string_has_suffix(gExecutablePath, "/CommCenter") ||
 			string_has_suffix(gExecutablePath, "/CommCenterMobileHelper")) {
 			dlopen(JBROOT_PATH("/basebin/rootlesshooks.dylib"), RTLD_NOW);
