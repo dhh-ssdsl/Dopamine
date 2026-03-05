@@ -114,8 +114,8 @@ static NSUUID *generateDeterministicUUID(NSString *bundleID)
 {
 	NSString *input = [NSString stringWithFormat:@"jb-ne-uuid:%@", bundleID];
 	const char *cstr = [input UTF8String];
-	unsigned char digest[CC_MD5_DIGEST_LENGTH];
-	CC_MD5(cstr, (CC_LONG)strlen(cstr), digest);
+	unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+	CC_SHA256(cstr, (CC_LONG)strlen(cstr), digest);
 
 	// Format as UUID v3 (set version and variant bits)
 	digest[6] = (digest[6] & 0x0F) | 0x30; // version 3

@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - '*'
+    tags:
+      - '*'
     paths-ignore:
       - ".gitignore"
   pull_request:
@@ -11,7 +13,15 @@ on:
       - '*'
     paths-ignore:
       - ".gitignore"
+  release:
+    types: [published, created]
   workflow_dispatch:
+    inputs:
+      build_full:
+        description: 'Build full IPA'
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: '0 0 1 1 *'
     - cron: '0 0 1 4 *'
@@ -92,14 +102,32 @@ jobs:
             cd Application/Dopamine/Resources
             ./download_bootstraps.sh
 
-      - name: Build
+      - name: Build BaseBin (Default)
+        if: "!startsWith(github.ref, 'refs/tags/') && github.event_name != 'release' && github.event.inputs.build_full != 'true'"
+        run: |
+          set -x
+          export BASEDIR="$(pwd)"
+          export THEOS="${BASEDIR}/theos"
+          gmake -C BaseBin -j$(sysctl -n hw.logicalcpu) NIGHTLY=1
+
+      - name: Build Full (Release / Manual)
+        if: "startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event.inputs.build_full == 'true'"
         run: |
           set -x
           export BASEDIR="$(pwd)"
           export THEOS="${BASEDIR}/theos"
           gmake -j$(sysctl -n hw.logicalcpu) NIGHTLY=1
 
-      - name: Upload Artifact
+      - name: Upload BaseBin Artifact
+        if: "!startsWith(github.ref, 'refs/tags/') && github.event_name != 'release' && github.event.inputs.build_full != 'true'"
+        uses: actions/upload-artifact@main
+        with:
+          name: basebin
+          path: |
+            ${{ github.workspace }}/BaseBin/basebin.tar
+
+      - name: Upload IPA Artifact
+        if: "startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event.inputs.build_full == 'true'"
         id: dopamine-latest-upload
         uses: actions/upload-artifact@main
         with:
