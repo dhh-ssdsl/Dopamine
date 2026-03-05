@@ -104,27 +104,6 @@ static NSSet *cachedJBBundleIDs(void)
 }
 
 // ============================================================
-// Deterministic UUID Generation
-//
-// Generates a stable UUID from bundleID (same UUID across reboots).
-// Uses MD5 hash formatted as UUID v3 style.
-// ============================================================
-
-static NSUUID *generateDeterministicUUID(NSString *bundleID)
-{
-	NSString *input = [NSString stringWithFormat:@"jb-ne-uuid:%@", bundleID];
-	const char *cstr = [input UTF8String];
-	unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-	CC_SHA256(cstr, (CC_LONG)strlen(cstr), digest);
-
-	// Format as UUID v3 (set version and variant bits)
-	digest[6] = (digest[6] & 0x0F) | 0x30; // version 3
-	digest[8] = (digest[8] & 0x3F) | 0x80; // variant 1
-
-	return [[NSUUID alloc] initWithUUIDBytes:digest];
-}
-
-// ============================================================
 // JB Network Rules Plist Storage
 // ============================================================
 
