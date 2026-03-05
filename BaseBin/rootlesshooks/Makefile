@@ -1,5 +1,5 @@
 TARGET := iphone:clang:latest:15.0
-INSTALL_TARGET_PROCESSES = lsd cfprefsd CommCenter CommCenterMobileHelper SpringBoard nehelper
+INSTALL_TARGET_PROCESSES = lsd cfprefsd CommCenter CommCenterMobileHelper SpringBoard nehelper symptomsd networkd
 FINALPACKAGE = 1
 THEOS_PACKAGE_SCHEME = rootless
 ARCHS = arm64 arm64e

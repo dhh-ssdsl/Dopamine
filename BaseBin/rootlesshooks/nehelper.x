@@ -118,30 +118,51 @@ static NSString *jbNetworkRulesPlistPath(void)
 	return path;
 }
 
-static void saveJBRules(NSArray *jbRules)
+static void saveJBRules(NSArray *jbRules, NSString *key)
 {
+	if (!key) return;
+
+	NSString *path = jbNetworkRulesPlistPath();
+	NSMutableDictionary *plistDict = [NSMutableDictionary dictionary];
+
+	if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+		NSData *existingData = [NSData dataWithContentsOfFile:path];
+		if (existingData) {
+			NSDictionary *dict = [NSPropertyListSerialization propertyListWithData:existingData options:0 format:nil error:nil];
+			if ([dict isKindOfClass:[NSDictionary class]]) {
+				[plistDict addEntriesFromDictionary:dict];
+			}
+		}
+	}
+
 	if (!jbRules.count) {
-		[[NSFileManager defaultManager] removeItemAtPath:jbNetworkRulesPlistPath() error:nil];
-		NE_LOG("saveJBRules: no JB rules, removed plist");
+		[plistDict removeObjectForKey:key];
+		NE_LOG("saveJBRules: no JB rules for %s, removed key", key.UTF8String);
+	} else {
+		NSData *archivedData = nil;
+		@try {
+			archivedData = [NSKeyedArchiver archivedDataWithRootObject:jbRules
+			                              requiringSecureCoding:NO
+			                                             error:nil];
+		} @catch (NSException *e) {
+			NE_LOG("saveJBRules: archive exception: %s", e.reason.UTF8String);
+			return;
+		}
+
+		if (archivedData) {
+			plistDict[key] = archivedData;
+		} else {
+			NE_LOG("saveJBRules: NSKeyedArchiver failed, nil data for %s", key.UTF8String);
+			return;
+		}
+	}
+
+	if (plistDict.count == 0) {
+		[[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+		NE_LOG("saveJBRules: plist empty, removed files");
 		return;
 	}
 
-	NSData *archivedData = nil;
-	@try {
-		archivedData = [NSKeyedArchiver archivedDataWithRootObject:jbRules
-		                              requiringSecureCoding:NO
-		                                             error:nil];
-	} @catch (NSException *e) {
-		NE_LOG("saveJBRules: archive exception: %s", e.reason.UTF8String);
-		return;
-	}
-
-	if (!archivedData) {
-		NE_LOG("saveJBRules: NSKeyedArchiver failed, nil data");
-		return;
-	}
-
-	NSDictionary *plistDict = @{ @"rules": archivedData };
 	NSError *err = nil;
 	NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:plistDict
 	                                                              format:NSPropertyListXMLFormat_v1_0
@@ -152,18 +173,20 @@ static void saveJBRules(NSArray *jbRules)
 		return;
 	}
 
-	NSString *dir = [jbNetworkRulesPlistPath() stringByDeletingLastPathComponent];
+	NSString *dir = [path stringByDeletingLastPathComponent];
 	[[NSFileManager defaultManager] createDirectoryAtPath:dir
 	                          withIntermediateDirectories:YES
 	                                         attributes:nil
 	                                              error:nil];
 
-	BOOL ok = [plistData writeToFile:jbNetworkRulesPlistPath() atomically:YES];
-	NE_LOG("saveJBRules: wrote %lu JB rules to plist: %s", (unsigned long)jbRules.count, ok ? "OK" : "FAILED");
+	BOOL ok = [plistData writeToFile:path atomically:YES];
+	NE_LOG("saveJBRules: wrote %lu %s rules to plist: %s", (unsigned long)jbRules.count, key.UTF8String, ok ? "OK" : "FAILED");
 }
 
-static NSArray *loadJBRules(void)
+static NSArray *loadJBRules(NSString *key)
 {
+	if (!key) return nil;
+
 	NSString *path = jbNetworkRulesPlistPath();
 	if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
 
@@ -183,9 +206,9 @@ static NSArray *loadJBRules(void)
 		return nil;
 	}
 
-	NSData *archivedData = plistDict[@"rules"];
+	NSData *archivedData = plistDict[key];
 	if (![archivedData isKindOfClass:[NSData class]]) {
-		NE_LOG("loadJBRules: no 'rules' data key");
+		NE_LOG("loadJBRules: no '%s' data key", key.UTF8String);
 		return nil;
 	}
 
@@ -207,7 +230,7 @@ static NSArray *loadJBRules(void)
 		return nil;
 	}
 
-	NE_LOG("loadJBRules: loaded %lu JB rules from plist", (unsigned long)rules.count);
+	NE_LOG("loadJBRules: loaded %lu JB rules for %s", (unsigned long)rules.count, key.UTF8String);
 	return rules;
 }
 
@@ -249,7 +272,7 @@ static void hook_encode_object_forKey(id self, SEL _cmd, id obj, NSString *key)
 
 		// Save JB rules to JB-specific plist
 		gIsRoutingNE = YES;
-		saveJBRules(jbRules);
+		saveJBRules(jbRules, key);
 		gIsRoutingNE = NO;
 
 		// Write ONLY system rules to system plist (read-write separation)
@@ -271,7 +294,7 @@ static id hook_decode_object_forKey(id self, SEL _cmd, NSString *key)
 	    [obj isKindOfClass:[NSArray class]])
 	{
 		gIsRoutingNE = YES;
-		NSArray *jbRules = loadJBRules();
+		NSArray *jbRules = loadJBRules(key);
 		gIsRoutingNE = NO;
 
 		if (jbRules.count) {
