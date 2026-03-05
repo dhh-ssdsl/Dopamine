@@ -210,6 +210,12 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 				chmod(wirelessCellularDbPath, 0644);
 			}
 		}
+
+		// CommCenter can come up very early (before injection chain is fully warm).
+		// Restart once during jailbreak startup to ensure it respawns with hooks active.
+		exec_cmd("/usr/bin/killall", "-9", "CommCenter", NULL);
+		exec_cmd("/usr/bin/killall", "-9", "CommCenterMobileHelper", NULL);
+
 		char *panicMessage = NULL;
 		if (jbclient_watchdog_get_last_userspace_panic(&panicMessage) == 0) {
 			NSString *printMessage = [NSString stringWithFormat:@"Dopamine has protected you from a userspace panic by temporarily disabling tweak injection and triggering a userspace reboot instead. A log is available under Analytics in the Preferences app. You can reenable tweak injection in the Dopamine app.\n\nPanic message: \n%s", panicMessage];
