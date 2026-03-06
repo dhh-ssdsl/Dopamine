@@ -40,7 +40,10 @@ static __thread BOOL gBypassRewrite = NO;
 static int (*orig_sqlite3_open)(const char *filename, sqlite3 **ppDb);
 static int (*orig_sqlite3_open_v2)(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
 static int (*orig_sqlite3_prepare_v2)(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+static int (*orig_sqlite3_prepare_v3)(sqlite3 *db, const char *zSql, int nByte, unsigned int prepFlags, sqlite3_stmt **ppStmt, const char **pzTail);
 static int (*orig_sqlite3_exec)(sqlite3 *db, const char *sql, int (*callback)(void*, int, char**, char**), void *arg, char **errmsg);
+
+static NSString *rewriteSQLForRouter(NSString *sql);
 
 static BOOL isCellularUsageDBPath(const char *filename)
 {
@@ -539,6 +542,96 @@ static void setupCellularDB(sqlite3 *db, const char *filename)
 	       gRoutingReady);
 }
 
+static void cc_ensure_routing_if_needed(sqlite3 *db)
+{
+	if (!db) return;
+
+	if (db != gCellularDB || !gRoutingReady) {
+		const char *filename = sqlite3_db_filename(db, "main");
+		if (isCellularUsageDBPath(filename)) {
+			setupCellularDB(db, filename);
+		}
+	}
+}
+
+static void cc_rebuild_routing(sqlite3 *db)
+{
+	if (!db) return;
+
+	const char *filename = sqlite3_db_filename(db, "main");
+	if (!isCellularUsageDBPath(filename)) return;
+
+	if (db == gCellularDB) {
+		gRoutingReady = NO;
+	}
+	setupCellularDB(db, filename);
+}
+
+static BOOL cc_should_retry_missing_router(sqlite3 *db, const char *errmsg)
+{
+	const char *dbErr = errmsg;
+	if ((!dbErr || !dbErr[0]) && db) {
+		dbErr = sqlite3_errmsg(db);
+	}
+	return (dbErr && strstr(dbErr, "no such table: jb_bundle_info_router"));
+}
+
+static int cc_prepare_router_v2(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail)
+{
+	if (gBypassRewrite || !zSql) {
+		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+	}
+
+	cc_ensure_routing_if_needed(db);
+	if (db != gCellularDB || !gRoutingReady) {
+		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+	}
+
+	NSString *sql = [NSString stringWithUTF8String:zSql];
+	if (!sql) {
+		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+	}
+
+	NSString *rewritten = rewriteSQLForRouter(sql);
+	const char *sqlToPrepare = [rewritten isEqualToString:sql] ? zSql : rewritten.UTF8String;
+	int prepareLen = [rewritten isEqualToString:sql] ? nByte : -1;
+	int rc = orig_sqlite3_prepare_v2(db, sqlToPrepare, prepareLen, ppStmt, pzTail);
+	if (rc != SQLITE_OK && ![rewritten isEqualToString:sql] && cc_should_retry_missing_router(db, NULL)) {
+		CC_LOG("hook_sqlite3_prepare_v2: rebuilding router after missing temp view sql=%.140s", zSql);
+		cc_rebuild_routing(db);
+		rc = orig_sqlite3_prepare_v2(db, sqlToPrepare, prepareLen, ppStmt, pzTail);
+	}
+	return rc;
+}
+
+static int cc_prepare_router_v3(sqlite3 *db, const char *zSql, int nByte, unsigned int prepFlags, sqlite3_stmt **ppStmt, const char **pzTail)
+{
+	if (gBypassRewrite || !zSql) {
+		return orig_sqlite3_prepare_v3(db, zSql, nByte, prepFlags, ppStmt, pzTail);
+	}
+
+	cc_ensure_routing_if_needed(db);
+	if (db != gCellularDB || !gRoutingReady) {
+		return orig_sqlite3_prepare_v3(db, zSql, nByte, prepFlags, ppStmt, pzTail);
+	}
+
+	NSString *sql = [NSString stringWithUTF8String:zSql];
+	if (!sql) {
+		return orig_sqlite3_prepare_v3(db, zSql, nByte, prepFlags, ppStmt, pzTail);
+	}
+
+	NSString *rewritten = rewriteSQLForRouter(sql);
+	const char *sqlToPrepare = [rewritten isEqualToString:sql] ? zSql : rewritten.UTF8String;
+	int prepareLen = [rewritten isEqualToString:sql] ? nByte : -1;
+	int rc = orig_sqlite3_prepare_v3(db, sqlToPrepare, prepareLen, prepFlags, ppStmt, pzTail);
+	if (rc != SQLITE_OK && ![rewritten isEqualToString:sql] && cc_should_retry_missing_router(db, NULL)) {
+		CC_LOG("hook_sqlite3_prepare_v3: rebuilding router after missing temp view sql=%.140s", zSql);
+		cc_rebuild_routing(db);
+		rc = orig_sqlite3_prepare_v3(db, sqlToPrepare, prepareLen, prepFlags, ppStmt, pzTail);
+	}
+	return rc;
+}
+
 static int hook_sqlite3_open(const char *filename, sqlite3 **ppDb)
 {
 	int r = orig_sqlite3_open(filename, ppDb);
@@ -559,34 +652,12 @@ static int hook_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags,
 
 static int hook_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail)
 {
-	if (gBypassRewrite || !zSql) {
-		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
-	}
+	return cc_prepare_router_v2(db, zSql, nByte, ppStmt, pzTail);
+}
 
-	if (db != gCellularDB || !gRoutingReady) {
-		const char *filename = sqlite3_db_filename(db, "main");
-		if (isCellularUsageDBPath(filename)) {
-			setupCellularDB(db, filename);
-		} else {
-			return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
-		}
-	}
-
-	if (db != gCellularDB || !gRoutingReady) {
-		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
-	}
-
-	NSString *sql = [NSString stringWithUTF8String:zSql];
-	if (!sql) {
-		return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
-	}
-
-	NSString *rewritten = rewriteSQLForRouter(sql);
-	if (![rewritten isEqualToString:sql]) {
-		return orig_sqlite3_prepare_v2(db, rewritten.UTF8String, -1, ppStmt, pzTail);
-	}
-
-	return orig_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+static int hook_sqlite3_prepare_v3(sqlite3 *db, const char *zSql, int nByte, unsigned int prepFlags, sqlite3_stmt **ppStmt, const char **pzTail)
+{
+	return cc_prepare_router_v3(db, zSql, nByte, prepFlags, ppStmt, pzTail);
 }
 
 static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*, int, char**, char**), void *arg, char **errmsg)
@@ -595,19 +666,25 @@ static int hook_sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*
 		return orig_sqlite3_exec(db, sql, callback, arg, errmsg);
 	}
 
-	if (db != gCellularDB || !gRoutingReady) {
-		const char *filename = sqlite3_db_filename(db, "main");
-		if (isCellularUsageDBPath(filename)) {
-			setupCellularDB(db, filename);
-		}
-	}
+	cc_ensure_routing_if_needed(db);
 
 	if (db == gCellularDB && gRoutingReady) {
 		NSString *sqlStr = [NSString stringWithUTF8String:sql];
 		if (sqlStr) {
 			NSString *rewritten = rewriteSQLForRouter(sqlStr);
 			if (![rewritten isEqualToString:sqlStr]) {
-				return orig_sqlite3_exec(db, rewritten.UTF8String, callback, arg, errmsg);
+				int rc = orig_sqlite3_exec(db, rewritten.UTF8String, callback, arg, errmsg);
+				const char *errText = (errmsg && *errmsg) ? *errmsg : NULL;
+				if (rc != SQLITE_OK && cc_should_retry_missing_router(db, errText)) {
+					CC_LOG("hook_sqlite3_exec: rebuilding router after missing temp view sql=%.140s", sql);
+					if (errmsg && *errmsg) {
+						sqlite3_free(*errmsg);
+						*errmsg = NULL;
+					}
+					cc_rebuild_routing(db);
+					rc = orig_sqlite3_exec(db, rewritten.UTF8String, callback, arg, errmsg);
+				}
+				return rc;
 			}
 		}
 	}
@@ -633,6 +710,7 @@ void commcenterInit(void)
 	MSHookFunction(sqlite3_open, (void *)hook_sqlite3_open, (void **)&orig_sqlite3_open);
 	MSHookFunction(sqlite3_open_v2, (void *)hook_sqlite3_open_v2, (void **)&orig_sqlite3_open_v2);
 	MSHookFunction(sqlite3_prepare_v2, (void *)hook_sqlite3_prepare_v2, (void **)&orig_sqlite3_prepare_v2);
+	MSHookFunction(sqlite3_prepare_v3, (void *)hook_sqlite3_prepare_v3, (void **)&orig_sqlite3_prepare_v3);
 	MSHookFunction(sqlite3_exec, (void *)hook_sqlite3_exec, (void **)&orig_sqlite3_exec);
 	CC_LOG("commcenterInit: sqlite3 hooks installed");
 }

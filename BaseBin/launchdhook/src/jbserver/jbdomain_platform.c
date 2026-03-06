@@ -236,7 +236,13 @@ static int platform_cellular_usage_load(xpc_object_t *rowsOut)
 	}
 
 	sqlite3_stmt *stmt = NULL;
-	int rc = sqlite3_prepare_v2(db, "SELECT bundle_id, flags FROM bundle_info", -1, &stmt, NULL);
+	int rc = sqlite3_prepare_v2(db,
+		"SELECT bundle_id, flags "
+		"FROM bundle_info "
+		"WHERE rowid IN (SELECT MAX(rowid) FROM bundle_info GROUP BY bundle_id)",
+		-1,
+		&stmt,
+		NULL);
 	if (rc != SQLITE_OK) {
 		platform_log("cellular load prepare failed rc=%d", rc);
 		sqlite3_close(db);
@@ -273,21 +279,42 @@ static int platform_cellular_usage_upsert(const char *bundleID, uint64_t flags)
 		return -1;
 	}
 
-	sqlite3_stmt *stmt = NULL;
-	int rc = sqlite3_prepare_v2(db,
-		"INSERT OR REPLACE INTO bundle_info(bundle_id, flags) VALUES(?, ?)",
-		-1,
-		&stmt,
-		NULL);
+	sqlite3_stmt *deleteStmt = NULL;
+	sqlite3_stmt *insertStmt = NULL;
+	int rc = platform_sql_exec(db, "BEGIN IMMEDIATE TRANSACTION", "cellular_upsert(begin)");
 	if (rc == SQLITE_OK) {
-		sqlite3_bind_text(stmt, 1, bundleID, -1, SQLITE_TRANSIENT);
-		sqlite3_bind_int64(stmt, 2, (sqlite3_int64)flags);
-		rc = sqlite3_step(stmt);
+		rc = sqlite3_prepare_v2(db, "DELETE FROM bundle_info WHERE bundle_id=?", -1, &deleteStmt, NULL);
 	}
-	sqlite3_finalize(stmt);
+	if (rc == SQLITE_OK) {
+		sqlite3_bind_text(deleteStmt, 1, bundleID, -1, SQLITE_TRANSIENT);
+		rc = sqlite3_step(deleteStmt);
+		if (rc == SQLITE_DONE) rc = SQLITE_OK;
+	}
+	sqlite3_finalize(deleteStmt);
+
+	if (rc == SQLITE_OK) {
+		rc = sqlite3_prepare_v2(db,
+			"INSERT INTO bundle_info(bundle_id, flags) VALUES(?, ?)",
+			-1,
+			&insertStmt,
+			NULL);
+	}
+	if (rc == SQLITE_OK) {
+		sqlite3_bind_text(insertStmt, 1, bundleID, -1, SQLITE_TRANSIENT);
+		sqlite3_bind_int64(insertStmt, 2, (sqlite3_int64)flags);
+		rc = sqlite3_step(insertStmt);
+		if (rc == SQLITE_DONE) rc = SQLITE_OK;
+	}
+	sqlite3_finalize(insertStmt);
+
+	if (rc == SQLITE_OK) {
+		rc = platform_sql_exec(db, "COMMIT TRANSACTION", "cellular_upsert(commit)");
+	} else {
+		platform_sql_exec(db, "ROLLBACK TRANSACTION", "cellular_upsert(rollback)");
+	}
 	sqlite3_close(db);
 
-	if (rc != SQLITE_DONE) {
+	if (rc != SQLITE_OK) {
 		platform_log("cellular upsert failed bundle=%s flags=%llu rc=%d",
 		             bundleID,
 		             flags,
