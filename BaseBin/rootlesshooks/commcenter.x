@@ -7,6 +7,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <errno.h>
+#import "../libjailbreak/src/jbclient_xpc.h"
 #import "perm_router.h"
 
 // sqlite3_db_filename is available on iOS 6+.
@@ -61,42 +62,6 @@ static void sqlite_jb_is_client(sqlite3_context *context, int argc, sqlite3_valu
 	sqlite3_result_int(context, isJailbreakBundleID((const char *)client) ? 1 : 0);
 }
 
-static NSString *legacyJBCellularDBPath(void)
-{
-	static NSString *path = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		path = perm_jb_mirror_path_ns(@"/var/wireless/Library/Databases/.jb_cellular.db");
-	});
-	return path;
-}
-
-static void migrateLegacyJBCellularDBIfNeeded(NSString *targetPath)
-{
-	if (!targetPath.length) return;
-
-	NSString *legacyPath = legacyJBCellularDBPath();
-	if (!legacyPath.length || [legacyPath isEqualToString:targetPath]) return;
-
-	NSFileManager *fm = [NSFileManager defaultManager];
-	if (![fm fileExistsAtPath:legacyPath]) return;
-
-	if ([fm fileExistsAtPath:targetPath]) {
-		CC_LOG("migrateLegacyJBCellularDBIfNeeded: target exists, keeping legacy file");
-		return;
-	}
-
-	perm_ensure_parent_dir_for_path(targetPath);
-	NSError *moveErr = nil;
-	BOOL moved = [fm moveItemAtPath:legacyPath toPath:targetPath error:&moveErr];
-	if (moved) {
-		CC_LOG("migrateLegacyJBCellularDBIfNeeded: moved legacy db to mirror path");
-	} else {
-		CC_LOG("migrateLegacyJBCellularDBIfNeeded: move failed: %s",
-		       moveErr.localizedDescription.UTF8String ?: "unknown");
-	}
-}
-
 static NSString *resolveJBCellularDBPath(const char *systemFilename)
 {
 	NSString *systemPath = nil;
@@ -137,134 +102,334 @@ static int cc_exec_raw(sqlite3 *db, const char *sql)
 	return rc;
 }
 
-static BOOL ensureJBCellularAttached(sqlite3 *db)
+static int cc_exec_direct(sqlite3 *db, const char *sql)
 {
-	if (!gJBCellularPath.length) return NO;
+	if (!db || !sql) return SQLITE_ERROR;
 
-	NSString *escapedPath = [gJBCellularPath stringByReplacingOccurrencesOfString:@"'" withString:@"''"];
-	NSString *attachSQL = [NSString stringWithFormat:@"ATTACH DATABASE '%@' AS jbcellular", escapedPath];
-	int attachRC = cc_exec_raw(db, attachSQL.UTF8String);
-	if (attachRC != SQLITE_OK) {
-		const char *alreadyAttachedPath = sqlite3_db_filename(db, "jbcellular");
-		if (!alreadyAttachedPath) {
-			CC_LOG("ensureJBCellularAttached: attach failed rc=%d path=%s",
-			       attachRC, gJBCellularPath.UTF8String);
-			return NO;
-		}
+	char *errmsg = NULL;
+	gBypassRewrite = YES;
+	int rc = orig_sqlite3_exec ? orig_sqlite3_exec(db, sql, NULL, NULL, &errmsg)
+	                           : sqlite3_exec(db, sql, NULL, NULL, &errmsg);
+	gBypassRewrite = NO;
+
+	if (rc != SQLITE_OK && errmsg) {
+		CC_LOG("DIRECT SQL failed rc=%d err=%s sql=%.140s", rc, errmsg, sql);
 	}
-	return YES;
+	if (errmsg) sqlite3_free(errmsg);
+	return rc;
 }
 
-static void ensureJBCellularFileExists(void)
+static int cc_prepare_direct(sqlite3 *db, const char *sql, sqlite3_stmt **stmt)
 {
-	if (!gJBCellularPath.length) return;
+	if (!db || !sql || !stmt) return SQLITE_ERROR;
 
-	int fd = open(gJBCellularPath.fileSystemRepresentation, O_CREAT | O_RDWR, 0644);
-	if (fd >= 0) {
-		close(fd);
+	gBypassRewrite = YES;
+	int rc = orig_sqlite3_prepare_v2 ? orig_sqlite3_prepare_v2(db, sql, -1, stmt, NULL)
+	                                 : sqlite3_prepare_v2(db, sql, -1, stmt, NULL);
+	gBypassRewrite = NO;
+	if (rc != SQLITE_OK) {
+		CC_LOG("DIRECT prepare failed rc=%d err=%s sql=%.140s",
+		       rc,
+		       sqlite3_errmsg(db),
+		       sql);
+	}
+	return rc;
+}
+
+static xpc_object_t cc_proxy_load_rows(void)
+{
+	xpc_object_t rows = NULL;
+	int rc = jbclient_platform_cellular_usage_load(&rows);
+	if (rc != 0) {
+		CC_LOG("proxy load failed rc=%d", rc);
+		if (rows) xpc_release(rows);
+		return NULL;
+	}
+	return rows;
+}
+
+static int cc_proxy_upsert(const char *bundleID, sqlite3_int64 flags)
+{
+	int rc = jbclient_platform_cellular_usage_upsert(bundleID, (uint64_t)flags);
+	if (rc != 0) {
+		CC_LOG("proxy upsert failed bundle=%s flags=%lld rc=%d",
+		       bundleID ?: "(null)",
+		       flags,
+		       rc);
+	}
+	return rc;
+}
+
+static int cc_proxy_delete(const char *bundleID)
+{
+	int rc = jbclient_platform_cellular_usage_delete(bundleID);
+	if (rc != 0) {
+		CC_LOG("proxy delete failed bundle=%s rc=%d", bundleID ?: "(null)", rc);
+	}
+	return rc;
+}
+
+static void sqlite_jb_proxy_upsert(sqlite3_context *context, int argc, sqlite3_value **argv)
+{
+	if (argc != 2) {
+		sqlite3_result_error(context, "jb_proxy_upsert argc", -1);
 		return;
 	}
 
-	CC_LOG("ensureJBCellularFileExists: open failed errno=%d path=%s",
-	       errno,
-	       gJBCellularPath.UTF8String ?: "(null)");
+	const unsigned char *bundleID = sqlite3_value_text(argv[0]);
+	sqlite3_int64 flags = sqlite3_value_int64(argv[1]);
+	if (!bundleID || !bundleID[0]) {
+		sqlite3_result_error(context, "jb_proxy_upsert bundle", -1);
+		return;
+	}
+
+	int rc = cc_proxy_upsert((const char *)bundleID, flags);
+	if (rc != 0) {
+		sqlite3_result_error(context, "jb_proxy_upsert failed", -1);
+		return;
+	}
+
+	sqlite3_result_int(context, 1);
 }
 
-static void migrateCellularRowsIfNeeded(sqlite3 *db)
+static void sqlite_jb_proxy_delete(sqlite3_context *context, int argc, sqlite3_value **argv)
 {
-	if (perm_migration_is_done(@"commcenter_cellular")) return;
-
-	int rc1 = cc_exec_raw(db,
-		"INSERT OR REPLACE INTO jbcellular.bundle_info "
-		"SELECT * FROM main.bundle_info WHERE jb_is_client(bundle_id)=1;");
-	int rc2 = cc_exec_raw(db,
-		"DELETE FROM main.bundle_info WHERE jb_is_client(bundle_id)=1;");
-
-	if (rc1 == SQLITE_OK && rc2 == SQLITE_OK) {
-		perm_migration_mark_done(@"commcenter_cellular");
-		CC_LOG("migrateCellularRowsIfNeeded: migration complete");
-	} else {
-		CC_LOG("migrateCellularRowsIfNeeded: failed rc1=%d rc2=%d", rc1, rc2);
+	if (argc != 1) {
+		sqlite3_result_error(context, "jb_proxy_delete argc", -1);
+		return;
 	}
+
+	const unsigned char *bundleID = sqlite3_value_text(argv[0]);
+	if (!bundleID || !bundleID[0]) {
+		sqlite3_result_error(context, "jb_proxy_delete bundle", -1);
+		return;
+	}
+
+	int rc = cc_proxy_delete((const char *)bundleID);
+	if (rc != 0) {
+		sqlite3_result_error(context, "jb_proxy_delete failed", -1);
+		return;
+	}
+
+	sqlite3_result_int(context, 1);
+}
+
+static NSUInteger migrateSystemJBRowsToProxy(sqlite3 *db)
+{
+	if (!db) return 0;
+
+	sqlite3_stmt *selectStmt = NULL;
+	if (cc_prepare_direct(db,
+	                      "SELECT bundle_id, flags FROM main.bundle_info WHERE jb_is_client(bundle_id)=1",
+	                      &selectStmt) != SQLITE_OK) {
+		return 0;
+	}
+
+	NSMutableArray<NSString *> *bundleIDsToDelete = [NSMutableArray array];
+	NSUInteger scanned = 0;
+	NSUInteger proxied = 0;
+
+	for (;;) {
+		int stepRC = sqlite3_step(selectStmt);
+		if (stepRC == SQLITE_DONE) break;
+		if (stepRC != SQLITE_ROW) {
+			CC_LOG("migrateSystemJBRowsToProxy: select step rc=%d", stepRC);
+			break;
+		}
+
+		const unsigned char *bundleIDText = sqlite3_column_text(selectStmt, 0);
+		sqlite3_int64 flags = sqlite3_column_int64(selectStmt, 1);
+		if (!bundleIDText || !bundleIDText[0]) continue;
+
+		scanned++;
+		if (cc_proxy_upsert((const char *)bundleIDText, flags) == 0) {
+			NSString *bundleID = [NSString stringWithUTF8String:(const char *)bundleIDText];
+			if (bundleID.length) {
+				[bundleIDsToDelete addObject:bundleID];
+				proxied++;
+			}
+		}
+	}
+	sqlite3_finalize(selectStmt);
+
+	if (!bundleIDsToDelete.count) {
+		if (scanned) {
+			CC_LOG("migrateSystemJBRowsToProxy: scanned=%lu proxied=0",
+			       (unsigned long)scanned);
+		}
+		return 0;
+	}
+
+	sqlite3_stmt *deleteStmt = NULL;
+	if (cc_prepare_direct(db, "DELETE FROM main.bundle_info WHERE bundle_id=?", &deleteStmt) != SQLITE_OK) {
+		return 0;
+	}
+
+	NSUInteger deleted = 0;
+	for (NSString *bundleID in bundleIDsToDelete) {
+		sqlite3_reset(deleteStmt);
+		sqlite3_clear_bindings(deleteStmt);
+		sqlite3_bind_text(deleteStmt, 1, bundleID.UTF8String, -1, SQLITE_TRANSIENT);
+		int stepRC = sqlite3_step(deleteStmt);
+		if (stepRC == SQLITE_DONE) {
+			deleted++;
+		} else {
+			CC_LOG("migrateSystemJBRowsToProxy: delete failed bundle=%s rc=%d",
+			       bundleID.UTF8String,
+			       stepRC);
+		}
+	}
+	sqlite3_finalize(deleteStmt);
+
+	CC_LOG("migrateSystemJBRowsToProxy: scanned=%lu proxied=%lu deleted=%lu",
+	       (unsigned long)scanned,
+	       (unsigned long)proxied,
+	       (unsigned long)deleted);
+	return deleted;
+}
+
+static NSUInteger loadProxyRowsIntoOverlay(sqlite3 *db)
+{
+	if (!db) return 0;
+
+	xpc_object_t rows = cc_proxy_load_rows();
+	if (!rows || xpc_get_type(rows) != XPC_TYPE_ARRAY) {
+		if (rows) xpc_release(rows);
+		return 0;
+	}
+
+	sqlite3_stmt *insertStmt = NULL;
+	if (cc_prepare_direct(db,
+	                      "INSERT INTO temp.jb_bundle_info_overlay(bundle_id, flags) VALUES(?, ?)",
+	                      &insertStmt) != SQLITE_OK) {
+		xpc_release(rows);
+		return 0;
+	}
+
+	NSUInteger loaded = 0;
+	size_t rowCount = xpc_array_get_count(rows);
+	for (size_t i = 0; i < rowCount; i++) {
+		xpc_object_t row = xpc_array_get_value(rows, i);
+		if (!row || xpc_get_type(row) != XPC_TYPE_DICTIONARY) continue;
+
+		const char *bundleID = xpc_dictionary_get_string(row, "bundle-id");
+		int64_t flags = xpc_dictionary_get_int64(row, "flags");
+		if (!bundleID || !bundleID[0]) continue;
+
+		sqlite3_reset(insertStmt);
+		sqlite3_clear_bindings(insertStmt);
+		sqlite3_bind_text(insertStmt, 1, bundleID, -1, SQLITE_TRANSIENT);
+		sqlite3_bind_int64(insertStmt, 2, flags);
+		int stepRC = sqlite3_step(insertStmt);
+		if (stepRC == SQLITE_DONE) {
+			loaded++;
+		} else {
+			CC_LOG("loadProxyRowsIntoOverlay: insert failed bundle=%s rc=%d", bundleID, stepRC);
+		}
+	}
+
+	sqlite3_finalize(insertStmt);
+	xpc_release(rows);
+	CC_LOG("loadProxyRowsIntoOverlay: loaded=%lu", (unsigned long)loaded);
+	return loaded;
 }
 
 static BOOL initializeCellularRouting(sqlite3 *db)
 {
-	if (!ensureJBCellularAttached(db)) return NO;
-
-	if (cc_exec_raw(db,
-		"CREATE TABLE IF NOT EXISTS jbcellular.bundle_info AS "
-		"SELECT * FROM main.bundle_info WHERE 0") != SQLITE_OK) {
-		CC_LOG("initializeCellularRouting: failed creating jb table");
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP TABLE IF NOT EXISTS jb_bundle_info_overlay AS SELECT * FROM main.bundle_info WHERE 0") != SQLITE_OK) {
+		CC_LOG("initializeCellularRouting: failed creating overlay table");
 		return NO;
 	}
 
-	migrateCellularRowsIfNeeded(db);
+	cc_exec_direct(db, "DELETE FROM temp.jb_bundle_info_overlay");
+	migrateSystemJBRowsToProxy(db);
+	loadProxyRowsIntoOverlay(db);
 
-	cc_exec_raw(db, "DROP VIEW IF EXISTS temp.jb_bundle_info_router");
-	cc_exec_raw(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_insert_main");
-	cc_exec_raw(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_insert_jb");
-	cc_exec_raw(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_update_main");
-	cc_exec_raw(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_update_jb");
-	cc_exec_raw(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_delete_router");
+	cc_exec_direct(db, "DROP VIEW IF EXISTS temp.jb_bundle_info_router");
+	cc_exec_direct(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_insert_main");
+	cc_exec_direct(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_insert_jb");
+	cc_exec_direct(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_update_main");
+	cc_exec_direct(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_update_jb");
+	cc_exec_direct(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_delete_main");
+	cc_exec_direct(db, "DROP TRIGGER IF EXISTS temp.jb_cellular_delete_jb");
 
-	if (cc_exec_raw(db,
-		"CREATE TEMP VIEW IF NOT EXISTS jb_bundle_info_router AS "
-		"SELECT m.* FROM main.bundle_info AS m "
-		"WHERE NOT EXISTS ("
-		"  SELECT 1 FROM jbcellular.bundle_info AS j WHERE j.bundle_id=m.bundle_id"
-		") "
-		"UNION ALL "
-		"SELECT * FROM jbcellular.bundle_info") != SQLITE_OK) {
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP VIEW IF NOT EXISTS jb_bundle_info_router AS "
+	                   "SELECT m.* FROM main.bundle_info AS m "
+	                   "WHERE NOT EXISTS ("
+	                   "  SELECT 1 FROM temp.jb_bundle_info_overlay AS j WHERE j.bundle_id=m.bundle_id"
+	                   ") "
+	                   "UNION ALL "
+	                   "SELECT * FROM temp.jb_bundle_info_overlay") != SQLITE_OK) {
 		CC_LOG("initializeCellularRouting: failed creating temp view");
 		return NO;
 	}
 
-	cc_exec_raw(db,
-		"CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_main "
-		"INSTEAD OF INSERT ON jb_bundle_info_router "
-		"WHEN jb_is_client(NEW.bundle_id)=0 "
-		"BEGIN "
-		"INSERT OR REPLACE INTO main.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-		"END;");
+	cc_exec_direct(db,
+	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_main "
+	               "INSTEAD OF INSERT ON jb_bundle_info_router "
+	               "WHEN jb_is_client(NEW.bundle_id)=0 "
+	               "BEGIN "
+	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
+	               "INSERT OR REPLACE INTO main.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	               "END;");
 
-	cc_exec_raw(db,
-		"CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_jb "
-		"INSTEAD OF INSERT ON jb_bundle_info_router "
-		"WHEN jb_is_client(NEW.bundle_id)=1 "
-		"BEGIN "
-		"INSERT OR REPLACE INTO jbcellular.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-		"END;");
+	cc_exec_direct(db,
+	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_jb "
+	               "INSTEAD OF INSERT ON jb_bundle_info_router "
+	               "WHEN jb_is_client(NEW.bundle_id)=1 "
+	               "BEGIN "
+	               "SELECT jb_proxy_upsert(NEW.bundle_id, NEW.flags); "
+	               "DELETE FROM main.bundle_info WHERE bundle_id=NEW.bundle_id; "
+	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
+	               "INSERT INTO temp.jb_bundle_info_overlay(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	               "END;");
 
-	cc_exec_raw(db,
-		"CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_main "
-		"INSTEAD OF UPDATE ON jb_bundle_info_router "
-		"WHEN jb_is_client(NEW.bundle_id)=0 "
-		"BEGIN "
-		"DELETE FROM jbcellular.bundle_info WHERE bundle_id=OLD.bundle_id; "
-		"DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
-		"INSERT OR REPLACE INTO main.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-		"END;");
+	cc_exec_direct(db,
+	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_main "
+	               "INSTEAD OF UPDATE ON jb_bundle_info_router "
+	               "WHEN jb_is_client(NEW.bundle_id)=0 "
+	               "BEGIN "
+	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
+	               "INSERT OR REPLACE INTO main.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	               "END;");
 
-	cc_exec_raw(db,
-		"CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_jb "
-		"INSTEAD OF UPDATE ON jb_bundle_info_router "
-		"WHEN jb_is_client(NEW.bundle_id)=1 "
-		"BEGIN "
-		"DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
-		"DELETE FROM jbcellular.bundle_info WHERE bundle_id=OLD.bundle_id; "
-		"INSERT OR REPLACE INTO jbcellular.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-		"END;");
+	cc_exec_direct(db,
+	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_jb "
+	               "INSTEAD OF UPDATE ON jb_bundle_info_router "
+	               "WHEN jb_is_client(NEW.bundle_id)=1 "
+	               "BEGIN "
+	               "SELECT jb_proxy_upsert(NEW.bundle_id, NEW.flags); "
+	               "SELECT CASE WHEN OLD.bundle_id != NEW.bundle_id THEN jb_proxy_delete(OLD.bundle_id) ELSE 0 END; "
+	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
+	               "DELETE FROM main.bundle_info WHERE bundle_id=NEW.bundle_id; "
+	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
+	               "INSERT INTO temp.jb_bundle_info_overlay(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	               "END;");
 
-	cc_exec_raw(db,
-		"CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_delete_router "
-		"INSTEAD OF DELETE ON jb_bundle_info_router "
-		"BEGIN "
-		"DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
-		"DELETE FROM jbcellular.bundle_info WHERE bundle_id=OLD.bundle_id; "
-		"END;");
+	cc_exec_direct(db,
+	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_delete_main "
+	               "INSTEAD OF DELETE ON jb_bundle_info_router "
+	               "WHEN jb_is_client(OLD.bundle_id)=0 "
+	               "BEGIN "
+	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
+	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	               "END;");
 
-	CC_LOG("initializeCellularRouting: TEMP view/triggers installed");
+	cc_exec_direct(db,
+	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_delete_jb "
+	               "INSTEAD OF DELETE ON jb_bundle_info_router "
+	               "WHEN jb_is_client(OLD.bundle_id)=1 "
+	               "BEGIN "
+	               "SELECT jb_proxy_delete(OLD.bundle_id); "
+	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
+	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	               "END;");
+
+	CC_LOG("initializeCellularRouting: proxy-backed TEMP view/triggers installed");
 	return YES;
 }
 
@@ -337,10 +502,6 @@ static void setupCellularDB(sqlite3 *db, const char *filename)
 		return;
 	}
 
-	perm_ensure_parent_dir_for_path(gJBCellularPath);
-	ensureJBCellularFileExists();
-	migrateLegacyJBCellularDBIfNeeded(gJBCellularPath);
-
 	sqlite3_create_function(db,
 	                        "jb_is_client",
 	                        1,
@@ -350,8 +511,26 @@ static void setupCellularDB(sqlite3 *db, const char *filename)
 	                        NULL,
 	                        NULL);
 
+	sqlite3_create_function(db,
+	                        "jb_proxy_upsert",
+	                        2,
+	                        SQLITE_UTF8,
+	                        NULL,
+	                        sqlite_jb_proxy_upsert,
+	                        NULL,
+	                        NULL);
+
+	sqlite3_create_function(db,
+	                        "jb_proxy_delete",
+	                        1,
+	                        SQLITE_UTF8,
+	                        NULL,
+	                        sqlite_jb_proxy_delete,
+	                        NULL,
+	                        NULL);
+
 	gRoutingReady = initializeCellularRouting(db);
-	CC_LOG("setupCellularDB: system=%s mirror=%s ready=%d",
+	CC_LOG("setupCellularDB: system=%s mirror=%s ready=%d mode=proxy-overlay",
 	       filename ?: "(null)",
 	       gJBCellularPath.UTF8String ?: "(null)",
 	       gRoutingReady);
@@ -444,9 +623,8 @@ void commcenterInit(void)
 	NSString *preflightMirror = perm_jb_mirror_path_ns(@"/var/wireless/Library/Databases/CellularUsage.db");
 	if (preflightMirror.length) {
 		gJBCellularPath = preflightMirror;
-		perm_ensure_parent_dir_for_path(gJBCellularPath);
-		ensureJBCellularFileExists();
-		CC_LOG("commcenterInit preflight: mirror=%s", gJBCellularPath.UTF8String ?: "(null)");
+		CC_LOG("commcenterInit preflight: mirror=%s mode=proxy-overlay",
+		       gJBCellularPath.UTF8String ?: "(null)");
 	}
 
 	MSHookFunction(sqlite3_open, (void *)hook_sqlite3_open, (void **)&orig_sqlite3_open);

@@ -176,7 +176,7 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 		protection_set_active(true);
 
 		// Ensure the JB-side directory for CommCenter cellular routing exists
-		// and is owned by _wireless. Must be done as root before CommCenter starts.
+		// and mirrors the system-side owner/layout before the privileged writer starts.
 		{
 			const char *wirelessDir = JBROOT_PATH("/var/wireless");
 			const char *wirelessLibraryDir = JBROOT_PATH("/var/wireless/Library");
@@ -195,7 +195,7 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 					error:nil];
 
 				// Existing directories may already be present with root ownership.
-				// Always repair owner/mode so CommCenter (_wireless) can create/open db files.
+				// Always repair owner/mode so the mirror matches the system-side layout.
 				if (pw) {
 					chown(path, pw->pw_uid, pw->pw_gid);
 					chmod(path, 0755);

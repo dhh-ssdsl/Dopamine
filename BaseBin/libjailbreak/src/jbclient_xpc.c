@@ -328,6 +328,48 @@ int jbclient_platform_set_systemwide_domain_enabled(bool enabled)
 	return -1;
 }
 
+int jbclient_platform_cellular_usage_load(xpc_object_t *rowsOut)
+{
+	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_PLATFORM, JBS_PLATFORM_CELLULAR_USAGE_LOAD, NULL);
+	if (xreply) {
+		int result = xpc_dictionary_get_int64(xreply, "result");
+		xpc_object_t rows = xpc_dictionary_get_value(xreply, "rows");
+		if (rows && rowsOut) *rowsOut = xpc_copy(rows);
+		xpc_release(xreply);
+		return result;
+	}
+	return -1;
+}
+
+int jbclient_platform_cellular_usage_upsert(const char *bundleID, uint64_t flags)
+{
+	xpc_object_t xargs = xpc_dictionary_create_empty();
+	xpc_dictionary_set_string(xargs, "bundle-id", bundleID);
+	xpc_dictionary_set_uint64(xargs, "flags", flags);
+	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_PLATFORM, JBS_PLATFORM_CELLULAR_USAGE_UPSERT, xargs);
+	xpc_release(xargs);
+	if (xreply) {
+		int result = xpc_dictionary_get_int64(xreply, "result");
+		xpc_release(xreply);
+		return result;
+	}
+	return -1;
+}
+
+int jbclient_platform_cellular_usage_delete(const char *bundleID)
+{
+	xpc_object_t xargs = xpc_dictionary_create_empty();
+	xpc_dictionary_set_string(xargs, "bundle-id", bundleID);
+	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_PLATFORM, JBS_PLATFORM_CELLULAR_USAGE_DELETE, xargs);
+	xpc_release(xargs);
+	if (xreply) {
+		int result = xpc_dictionary_get_int64(xreply, "result");
+		xpc_release(xreply);
+		return result;
+	}
+	return -1;
+}
+
 int jbclient_watchdog_intercept_userspace_panic(const char *panicMessage)
 {
 	xpc_object_t xargs = xpc_dictionary_create_empty();
