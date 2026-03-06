@@ -80,28 +80,6 @@ static NSString *resolveJBCellularDBPath(const char *systemFilename)
 	return mirrored;
 }
 
-static int cc_exec_raw(sqlite3 *db, const char *sql)
-{
-	if (!db || !sql) return SQLITE_ERROR;
-
-	char *errmsg = NULL;
-	int rc;
-
-	if (orig_sqlite3_exec) {
-		rc = orig_sqlite3_exec(db, sql, NULL, NULL, &errmsg);
-	} else {
-		gBypassRewrite = YES;
-		rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
-		gBypassRewrite = NO;
-	}
-
-	if (rc != SQLITE_OK && errmsg) {
-		CC_LOG("SQL failed rc=%d err=%s sql=%.140s", rc, errmsg, sql);
-	}
-	if (errmsg) sqlite3_free(errmsg);
-	return rc;
-}
-
 static int cc_exec_direct(sqlite3 *db, const char *sql)
 {
 	if (!db || !sql) return SQLITE_ERROR;
