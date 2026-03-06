@@ -36,6 +36,9 @@ static sqlite3 *gCellularDB = NULL;
 static NSString *gJBCellularPath = nil;
 static BOOL gRoutingReady = NO;
 static __thread BOOL gBypassRewrite = NO;
+static NSSet<NSString *> *gCCCachedJBBundleIDs = nil;
+static CFAbsoluteTime gCCBundleCacheLastRefresh = 0;
+static const CFAbsoluteTime kCCBundleCacheTTL = 30.0;
 
 static int (*orig_sqlite3_open)(const char *filename, sqlite3 **ppDb);
 static int (*orig_sqlite3_open_v2)(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
@@ -44,6 +47,43 @@ static int (*orig_sqlite3_prepare_v3)(sqlite3 *db, const char *zSql, int nByte, 
 static int (*orig_sqlite3_exec)(sqlite3 *db, const char *sql, int (*callback)(void*, int, char**, char**), void *arg, char **errmsg);
 
 static NSString *rewriteSQLForRouter(NSString *sql);
+
+static NSSet<NSString *> *cc_cached_jb_bundle_ids(void)
+{
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (gCCCachedJBBundleIDs && (now - gCCBundleCacheLastRefresh) < kCCBundleCacheTTL) {
+		return gCCCachedJBBundleIDs;
+	}
+
+	NSString *jbAppsPath = perm_jb_mirror_path_ns(@"/Applications");
+	if (!jbAppsPath.length) {
+		gCCCachedJBBundleIDs = [NSSet set];
+		gCCBundleCacheLastRefresh = now;
+		return gCCCachedJBBundleIDs;
+	}
+
+	NSArray<NSString *> *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbAppsPath error:nil];
+	NSMutableSet<NSString *> *bundleIDs = [NSMutableSet set];
+
+	for (id itemObj in contents) {
+		if (![itemObj isKindOfClass:[NSString class]]) continue;
+		NSString *item = (NSString *)itemObj;
+		if (![item hasSuffix:@".app"]) continue;
+
+		NSString *infoPath = [[jbAppsPath stringByAppendingPathComponent:item] stringByAppendingPathComponent:@"Info.plist"];
+		id infoObj = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+		if (![infoObj isKindOfClass:[NSDictionary class]]) continue;
+
+		id bundleIDObj = ((NSDictionary *)infoObj)[@"CFBundleIdentifier"];
+		if ([bundleIDObj isKindOfClass:[NSString class]] && [bundleIDObj length] > 0) {
+			[bundleIDs addObject:(NSString *)bundleIDObj];
+		}
+	}
+
+	gCCCachedJBBundleIDs = [bundleIDs copy];
+	gCCBundleCacheLastRefresh = now;
+	return gCCCachedJBBundleIDs;
+}
 
 static BOOL isCellularUsageDBPath(const char *filename)
 {
@@ -55,7 +95,7 @@ static bool isJailbreakBundleID(const char *bundleID)
 	if (!bundleID) return false;
 	NSString *bid = [NSString stringWithUTF8String:bundleID];
 	if (!bid.length) return false;
-	return perm_is_jailbreak_bundle_id(bid);
+	return [cc_cached_jb_bundle_ids() containsObject:bid];
 }
 
 static void sqlite_jb_is_client(sqlite3_context *context, int argc, sqlite3_value **argv)
