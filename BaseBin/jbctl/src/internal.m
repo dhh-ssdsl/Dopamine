@@ -243,11 +243,6 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 			int helperRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenterMobileHelper", NULL);
 			int mainRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenter", NULL);
 			internal_log("startup: kickstart pass=1 helper_rc=%d main_rc=%d", helperRC, mainRC);
-			usleep(500000);
-			internal_log("startup: kickstart CommCenter services (pass=2)");
-			helperRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenterMobileHelper", NULL);
-			mainRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenter", NULL);
-			internal_log("startup: kickstart pass=2 helper_rc=%d main_rc=%d", helperRC, mainRC);
 		}
 
 		char *panicMessage = NULL;

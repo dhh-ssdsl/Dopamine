@@ -76,8 +76,6 @@ NSString* getProcessName()
 		rootlesshooks_log("rootlesshooks", processName, executablePath);
 		extern void commcenterInit(void);
 		commcenterInit();
-		extern void nehelperInit(void);
-		nehelperInit();
 	}
 	else if ([processName isEqualToString:@"nehelper"] ||
 	         [processName isEqualToString:@"symptomsd"] ||
