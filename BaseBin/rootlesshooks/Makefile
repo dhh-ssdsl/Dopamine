@@ -9,7 +9,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = rootlesshooks
 
 rootlesshooks_FILES = $(wildcard *.x)
-rootlesshooks_CFLAGS = -fobjc-arc -DOS_OBJECT_USE_OBJC=0 -I../.include
+rootlesshooks_CFLAGS = -fobjc-arc -DOS_OBJECT_USE_OBJC_RETAIN_RELEASE=0 -I../.include
 rootlesshooks_LDFLAGS = -rpath @loader_path/fallback -L../libjailbreak -ljailbreak
 
 include $(THEOS_MAKE_PATH)/tweak.mk
