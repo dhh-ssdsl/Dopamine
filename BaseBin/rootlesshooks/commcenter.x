@@ -7,7 +7,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <errno.h>
-#import "../libjailbreak/src/jbclient_xpc.h"
+#import <libjailbreak/jbclient_xpc.h>
 #import "perm_router.h"
 
 // sqlite3_db_filename is available on iOS 6+.

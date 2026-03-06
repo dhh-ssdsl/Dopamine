@@ -3,7 +3,7 @@
 
 #include <libjailbreak/codesign.h>
 #include <libjailbreak/libjailbreak.h>
-#include <libroot.h>
+#include <libjailbreak/jbroot.h>
 #include <sqlite3.h>
 #include <limits.h>
 #include <sys/stat.h>
