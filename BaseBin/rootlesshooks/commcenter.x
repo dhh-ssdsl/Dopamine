@@ -344,68 +344,86 @@ static BOOL initializeCellularRouting(sqlite3 *db)
 		return NO;
 	}
 
-	cc_exec_direct(db,
-	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_main "
-	               "INSTEAD OF INSERT ON jb_bundle_info_router "
-	               "WHEN jb_is_client(NEW.bundle_id)=0 "
-	               "BEGIN "
-	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
-	               "INSERT OR REPLACE INTO main.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-	               "END;");
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_main "
+	                   "INSTEAD OF INSERT ON jb_bundle_info_router "
+	                   "WHEN jb_is_client(NEW.bundle_id)=0 "
+	                   "BEGIN "
+	                   "DELETE FROM jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
+	                   "INSERT OR REPLACE INTO bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	                   "END;") != SQLITE_OK) {
+		CC_LOG("initializeCellularRouting: failed creating jb_cellular_insert_main");
+		return NO;
+	}
 
-	cc_exec_direct(db,
-	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_jb "
-	               "INSTEAD OF INSERT ON jb_bundle_info_router "
-	               "WHEN jb_is_client(NEW.bundle_id)=1 "
-	               "BEGIN "
-	               "SELECT jb_proxy_upsert(NEW.bundle_id, NEW.flags); "
-	               "DELETE FROM main.bundle_info WHERE bundle_id=NEW.bundle_id; "
-	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
-	               "INSERT INTO temp.jb_bundle_info_overlay(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-	               "END;");
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_insert_jb "
+	                   "INSTEAD OF INSERT ON jb_bundle_info_router "
+	                   "WHEN jb_is_client(NEW.bundle_id)=1 "
+	                   "BEGIN "
+	                   "SELECT jb_proxy_upsert(NEW.bundle_id, NEW.flags); "
+	                   "DELETE FROM bundle_info WHERE bundle_id=NEW.bundle_id; "
+	                   "DELETE FROM jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
+	                   "INSERT INTO jb_bundle_info_overlay(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	                   "END;") != SQLITE_OK) {
+		CC_LOG("initializeCellularRouting: failed creating jb_cellular_insert_jb");
+		return NO;
+	}
 
-	cc_exec_direct(db,
-	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_main "
-	               "INSTEAD OF UPDATE ON jb_bundle_info_router "
-	               "WHEN jb_is_client(NEW.bundle_id)=0 "
-	               "BEGIN "
-	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
-	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
-	               "INSERT OR REPLACE INTO main.bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-	               "END;");
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_main "
+	                   "INSTEAD OF UPDATE ON jb_bundle_info_router "
+	                   "WHEN jb_is_client(NEW.bundle_id)=0 "
+	                   "BEGIN "
+	                   "DELETE FROM jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	                   "DELETE FROM bundle_info WHERE bundle_id=OLD.bundle_id; "
+	                   "INSERT OR REPLACE INTO bundle_info(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	                   "END;") != SQLITE_OK) {
+		CC_LOG("initializeCellularRouting: failed creating jb_cellular_update_main");
+		return NO;
+	}
 
-	cc_exec_direct(db,
-	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_jb "
-	               "INSTEAD OF UPDATE ON jb_bundle_info_router "
-	               "WHEN jb_is_client(NEW.bundle_id)=1 "
-	               "BEGIN "
-	               "SELECT jb_proxy_upsert(NEW.bundle_id, NEW.flags); "
-	               "SELECT CASE WHEN OLD.bundle_id != NEW.bundle_id THEN jb_proxy_delete(OLD.bundle_id) ELSE 0 END; "
-	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
-	               "DELETE FROM main.bundle_info WHERE bundle_id=NEW.bundle_id; "
-	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
-	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
-	               "INSERT INTO temp.jb_bundle_info_overlay(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
-	               "END;");
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_update_jb "
+	                   "INSTEAD OF UPDATE ON jb_bundle_info_router "
+	                   "WHEN jb_is_client(NEW.bundle_id)=1 "
+	                   "BEGIN "
+	                   "SELECT jb_proxy_upsert(NEW.bundle_id, NEW.flags); "
+	                   "SELECT CASE WHEN OLD.bundle_id != NEW.bundle_id THEN jb_proxy_delete(OLD.bundle_id) ELSE 0 END; "
+	                   "DELETE FROM bundle_info WHERE bundle_id=OLD.bundle_id; "
+	                   "DELETE FROM bundle_info WHERE bundle_id=NEW.bundle_id; "
+	                   "DELETE FROM jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	                   "DELETE FROM jb_bundle_info_overlay WHERE bundle_id=NEW.bundle_id; "
+	                   "INSERT INTO jb_bundle_info_overlay(bundle_id, flags) VALUES(NEW.bundle_id, NEW.flags); "
+	                   "END;") != SQLITE_OK) {
+		CC_LOG("initializeCellularRouting: failed creating jb_cellular_update_jb");
+		return NO;
+	}
 
-	cc_exec_direct(db,
-	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_delete_main "
-	               "INSTEAD OF DELETE ON jb_bundle_info_router "
-	               "WHEN jb_is_client(OLD.bundle_id)=0 "
-	               "BEGIN "
-	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
-	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
-	               "END;");
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_delete_main "
+	                   "INSTEAD OF DELETE ON jb_bundle_info_router "
+	                   "WHEN jb_is_client(OLD.bundle_id)=0 "
+	                   "BEGIN "
+	                   "DELETE FROM bundle_info WHERE bundle_id=OLD.bundle_id; "
+	                   "DELETE FROM jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	                   "END;") != SQLITE_OK) {
+		CC_LOG("initializeCellularRouting: failed creating jb_cellular_delete_main");
+		return NO;
+	}
 
-	cc_exec_direct(db,
-	               "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_delete_jb "
-	               "INSTEAD OF DELETE ON jb_bundle_info_router "
-	               "WHEN jb_is_client(OLD.bundle_id)=1 "
-	               "BEGIN "
-	               "SELECT jb_proxy_delete(OLD.bundle_id); "
-	               "DELETE FROM main.bundle_info WHERE bundle_id=OLD.bundle_id; "
-	               "DELETE FROM temp.jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
-	               "END;");
+	if (cc_exec_direct(db,
+	                   "CREATE TEMP TRIGGER IF NOT EXISTS jb_cellular_delete_jb "
+	                   "INSTEAD OF DELETE ON jb_bundle_info_router "
+	                   "WHEN jb_is_client(OLD.bundle_id)=1 "
+	                   "BEGIN "
+	                   "SELECT jb_proxy_delete(OLD.bundle_id); "
+	                   "DELETE FROM bundle_info WHERE bundle_id=OLD.bundle_id; "
+	                   "DELETE FROM jb_bundle_info_overlay WHERE bundle_id=OLD.bundle_id; "
+	                   "END;") != SQLITE_OK) {
+		CC_LOG("initializeCellularRouting: failed creating jb_cellular_delete_jb");
+		return NO;
+	}
 
 	CC_LOG("initializeCellularRouting: proxy-backed TEMP view/triggers installed");
 	return YES;

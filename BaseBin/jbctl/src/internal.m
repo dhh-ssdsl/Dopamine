@@ -6,8 +6,30 @@
 #import <pwd.h>
 #import <fcntl.h>
 #import <unistd.h>
+#import <stdarg.h>
+#import <time.h>
+#import <stdio.h>
 
 SInt32 CFUserNotificationDisplayAlert(CFTimeInterval timeout, CFOptionFlags flags, CFURLRef iconURL, CFURLRef soundURL, CFURLRef localizationURL, CFStringRef alertHeader, CFStringRef alertMessage, CFStringRef defaultButtonTitle, CFStringRef alternateButtonTitle, CFStringRef otherButtonTitle, CFOptionFlags *responseFlags) API_AVAILABLE(ios(3.0));
+
+static void internal_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void internal_log(const char *fmt, ...)
+{
+	FILE *f = fopen(JBROOT_PATH("/var/mobile/hook_debug.log"), "a");
+	if (!f) return;
+
+	time_t t = time(NULL);
+	struct tm tm;
+	localtime_r(&t, &tm);
+	fprintf(f, "%02d:%02d:%02d [jbctl] ", tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(f, fmt, ap);
+	va_end(ap);
+	fprintf(f, "\n");
+	fclose(f);
+}
 
 void execute_unsandboxed(void (^block)(void))
 {
@@ -212,10 +234,21 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 			}
 		}
 
-		// CommCenter can come up very early (before injection chain is fully warm).
-		// Restart once during jailbreak startup to ensure it respawns with hooks active.
-		exec_cmd("/usr/bin/killall", "-9", "CommCenter", NULL);
-		exec_cmd("/usr/bin/killall", "-9", "CommCenterMobileHelper", NULL);
+		// CommCenterMobileHelper commonly comes up before the main CommCenter daemon.
+		// Ask launchd to kick both services instead of only killing processes by path.
+		// Do a second pass shortly after the first one to catch early respawns that beat injection.
+		{
+			const char *launchctlPath = JBROOT_PATH("/usr/bin/launchctl");
+			internal_log("startup: kickstart CommCenter services (pass=1)");
+			int helperRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenterMobileHelper", NULL);
+			int mainRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenter", NULL);
+			internal_log("startup: kickstart pass=1 helper_rc=%d main_rc=%d", helperRC, mainRC);
+			usleep(500000);
+			internal_log("startup: kickstart CommCenter services (pass=2)");
+			helperRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenterMobileHelper", NULL);
+			mainRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenter", NULL);
+			internal_log("startup: kickstart pass=2 helper_rc=%d main_rc=%d", helperRC, mainRC);
+		}
 
 		char *panicMessage = NULL;
 		if (jbclient_watchdog_get_last_userspace_panic(&panicMessage) == 0) {

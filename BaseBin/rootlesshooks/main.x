@@ -1,6 +1,30 @@
 #import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
 #import <stdlib.h>
+#import <libroot.h>
+#import <time.h>
+#import <stdio.h>
+
+static void rootlesshooks_log(const char *tag, NSString *processName, NSString *executablePath)
+{
+	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
+	if (!f) return;
+
+	time_t t = time(NULL);
+	struct tm tm;
+	localtime_r(&t, &tm);
+	const char *tagValue = tag ? tag : "rootlesshooks";
+	const char *processValue = processName.UTF8String ? processName.UTF8String : "(null)";
+	const char *pathValue = executablePath.UTF8String ? executablePath.UTF8String : "(null)";
+	fprintf(f, "%02d:%02d:%02d [%s] process=%s path=%s\n",
+	        tm.tm_hour,
+	        tm.tm_min,
+	        tm.tm_sec,
+	        tagValue,
+	        processValue,
+	        pathValue);
+	fclose(f);
+}
 
 NSString* safe_getExecutablePath()
 {
@@ -49,6 +73,7 @@ NSString* getProcessName()
 	         [executablePath isEqualToString:@"/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter"] ||
 	         [executablePath isEqualToString:@"/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenterMobileHelper"] ||
 	         [executablePath containsString:@"/CommCenter"]) {
+		rootlesshooks_log("rootlesshooks", processName, executablePath);
 		extern void commcenterInit(void);
 		commcenterInit();
 		extern void nehelperInit(void);
