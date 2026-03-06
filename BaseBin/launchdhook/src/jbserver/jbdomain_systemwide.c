@@ -225,6 +225,12 @@ int systemwide_process_checkin(audit_token_t *processToken, char **rootPathOut, 
 	systemwide_get_jbroot(rootPathOut);
 	systemwide_get_boot_uuid(bootUUIDOut);
 
+	bool isCommCenterProcess =
+		!strcmp(procPath, "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter") ||
+		!strcmp(procPath, "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenterMobileHelper") ||
+		string_has_suffix(procPath, "/CommCenter") ||
+		string_has_suffix(procPath, "/CommCenterMobileHelper");
+
 	// Generate sandbox extensions for the requesting process
 	char *sandboxExtensionsArr[] = {
 		// Make /var/jb readable and executable
@@ -233,6 +239,10 @@ int systemwide_process_checkin(audit_token_t *processToken, char **rootPathOut, 
 
 		// Make /var/jb/var/mobile writable
 		sandbox_extension_issue_file_to_process("com.apple.app-sandbox.read-write", JBROOT_PATH("/var/mobile"), 0, *processToken),
+
+		// CommCenter persists China-region wireless usage policy under /var/wireless.
+		// Grant the JB mirror path so split read/write routing can store jailbreak app state.
+		isCommCenterProcess ? sandbox_extension_issue_file_to_process("com.apple.app-sandbox.read-write", JBROOT_PATH("/var/wireless"), 0, *processToken) : NULL,
 	};
 	int sandboxExtensionsCount = sizeof(sandboxExtensionsArr) / sizeof(char *);
 	*sandboxExtensionsOut = combine_strings('|', sandboxExtensionsArr, sandboxExtensionsCount);

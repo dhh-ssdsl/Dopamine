@@ -180,9 +180,10 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 		{
 			const char *wirelessDir = JBROOT_PATH("/var/wireless");
 			const char *wirelessLibraryDir = JBROOT_PATH("/var/wireless/Library");
+			const char *wirelessPrefsDir = JBROOT_PATH("/var/wireless/Library/Preferences");
 			const char *wirelessDbDir = JBROOT_PATH("/var/wireless/Library/Databases");
 			const char *wirelessCellularDbPath = JBROOT_PATH("/var/wireless/Library/Databases/CellularUsage.db");
-			const char *wirelessPaths[] = { wirelessDir, wirelessLibraryDir, wirelessDbDir };
+			const char *wirelessPaths[] = { wirelessDir, wirelessLibraryDir, wirelessPrefsDir, wirelessDbDir };
 			struct passwd *pw = getpwnam("_wireless");
 
 			for (size_t i = 0; i < sizeof(wirelessPaths) / sizeof(wirelessPaths[0]); i++) {
