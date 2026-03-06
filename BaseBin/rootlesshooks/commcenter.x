@@ -20,6 +20,9 @@ static void _cc_log(const char *fmt, ...)
 	if (!f) {
 		f = fopen(JBROOT_PATH_CSTRING("/var/wireless/Library/Preferences/hook_debug.log"), "a");
 	}
+	if (!f) {
+		f = fopen("/private/var/tmp/hook_debug.log", "a");
+	}
 	if (!f) return;
 	time_t t = time(NULL);
 	struct tm tm; localtime_r(&t, &tm);
@@ -223,6 +226,9 @@ static NSUInteger migrateSystemJBRowsToProxy(sqlite3 *db)
 		if (cc_proxy_upsert((const char *)bundleIDText, flags) == 0) {
 			NSString *bundleID = [NSString stringWithUTF8String:(const char *)bundleIDText];
 			if (bundleID.length) {
+				CC_LOG("migrateSystemJBRowsToProxy: proxied bundle=%s flags=%lld",
+				       bundleID.UTF8String,
+				       flags);
 				[bundleIDsToDelete addObject:bundleID];
 				proxied++;
 			}
@@ -300,6 +306,7 @@ static NSUInteger loadProxyRowsIntoOverlay(sqlite3 *db)
 		sqlite3_bind_int64(insertStmt, 2, flags);
 		int stepRC = sqlite3_step(insertStmt);
 		if (stepRC == SQLITE_DONE) {
+			CC_LOG("loadProxyRowsIntoOverlay: row bundle=%s flags=%lld", bundleID, flags);
 			loaded++;
 		} else {
 			CC_LOG("loadProxyRowsIntoOverlay: insert failed bundle=%s rc=%d", bundleID, stepRC);

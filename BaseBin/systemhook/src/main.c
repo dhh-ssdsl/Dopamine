@@ -28,12 +28,21 @@ char *get_jbroot(void) { return JB_RootPath; }
 __attribute__((used)) static const char *kSystemhookBuildTag = "SYSTEMHOOK_CC_INJECT_20260305_1";
 
 static void sh_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void sh_log(const char *fmt, ...)
+static FILE *sh_open_log_file(void)
 {
 	FILE *f = fopen(JBROOT_PATH("/var/mobile/hook_debug.log"), "a");
 	if (!f) {
 		f = fopen(JBROOT_PATH("/var/wireless/Library/Preferences/hook_debug.log"), "a");
 	}
+	if (!f) {
+		f = fopen("/private/var/tmp/hook_debug.log", "a");
+	}
+	return f;
+}
+
+static void sh_log(const char *fmt, ...)
+{
+	FILE *f = sh_open_log_file();
 	if (!f) return;
 
 	time_t t = time(NULL);
@@ -399,7 +408,8 @@ __attribute__((constructor)) static void initializer(void)
 	}
 #endif
 
-	if (load_executable_path() == 0) {
+	int executablePathRC = load_executable_path();
+	if (executablePathRC == 0) {
 		bool isCommCenterProcess =
 			process_path_matches("/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter") ||
 			process_path_matches("/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenterMobileHelper") ||
@@ -482,5 +492,11 @@ __attribute__((constructor)) static void initializer(void)
 		// Feeable attempt at adding back CS_VALID
 		jbclient_cs_revalidate();
 #endif
+	}
+	else {
+		const char *progName = getprogname();
+		if (progName && strstr(progName, "CommCenter") != NULL) {
+			sh_log("load_executable_path failed rc=%d prog=%s", executablePathRC, progName);
+		}
 	}
 }

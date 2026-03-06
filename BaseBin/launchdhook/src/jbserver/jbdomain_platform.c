@@ -254,6 +254,7 @@ static int platform_cellular_usage_load(xpc_object_t *rowsOut)
 		xpc_dictionary_set_int64(row, "flags", flags);
 		xpc_array_append_value(*rowsOut, row);
 		xpc_release(row);
+		platform_log("cellular load row bundle=%s flags=%lld", (const char *)bundleID, flags);
 		rowCount++;
 	}
 

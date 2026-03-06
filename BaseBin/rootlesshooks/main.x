@@ -8,6 +8,9 @@
 static void rootlesshooks_log(const char *tag, NSString *processName, NSString *executablePath)
 {
 	FILE *f = fopen(JBROOT_PATH_CSTRING("/var/mobile/hook_debug.log"), "a");
+	if (!f) {
+		f = fopen("/private/var/tmp/hook_debug.log", "a");
+	}
 	if (!f) return;
 
 	time_t t = time(NULL);

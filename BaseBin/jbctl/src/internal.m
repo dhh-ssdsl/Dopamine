@@ -234,16 +234,9 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 			}
 		}
 
-		// CommCenterMobileHelper commonly comes up before the main CommCenter daemon.
-		// Ask launchd to kick both services instead of only killing processes by path.
-		// Do a second pass shortly after the first one to catch early respawns that beat injection.
-		{
-			const char *launchctlPath = JBROOT_PATH("/usr/bin/launchctl");
-			internal_log("startup: kickstart CommCenter services (pass=1)");
-			int helperRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenterMobileHelper", NULL);
-			int mainRC = exec_cmd(launchctlPath, "kickstart", "-k", "system/com.apple.CommCenter", NULL);
-			internal_log("startup: kickstart pass=1 helper_rc=%d main_rc=%d", helperRC, mainRC);
-		}
+		// Avoid blocking the watchdog-sensitive startup path on launchctl kickstart.
+		// CommCenter and its helper will still be injected when launchd starts them.
+		internal_log("startup: skipping CommCenter kickstart to avoid blocking startup");
 
 		char *panicMessage = NULL;
 		if (jbclient_watchdog_get_last_userspace_panic(&panicMessage) == 0) {
