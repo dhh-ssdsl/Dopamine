@@ -109,8 +109,6 @@ if [[ -n "${THEOS:-}" ]]; then
 else
   export THEOS="${THEOS_HOME:-${DEFAULT_THEOS_HOME}}"
 fi
-mkdir -p "$THEOS"
-mkdir -p "$THEOS/sdks"
 SDK_DIR="${THEOS}/sdks/iPhoneOS16.5.sdk"
 
 if [[ "$PERSIST_ENV" == "1" ]]; then
@@ -118,6 +116,10 @@ if [[ "$PERSIST_ENV" == "1" ]]; then
 fi
 
 if [[ "$FORCE" == "1" || ! -f "${THEOS}/makefiles/common.mk" ]]; then
+  if [[ -d "$THEOS" && ! -x "${THEOS}/bin/update-theos" ]]; then
+    echo "Found partial THEOS install at ${THEOS} (missing bin/update-theos), removing it"
+    rm -rf "$THEOS"
+  fi
   THEOS_INSTALL_SH="${BASEDIR}/install-theos.sh"
   curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos -o "$THEOS_INSTALL_SH"
   gsed -E "/^[[:space:]]*get_theos[[:space:]]*$/,+1 s/^([[:space:]]*)(get_sdks)[[:space:]]*$/\1mkdir -p \\\${THEOS}\\/sdks\\n\1touch \\\${THEOS}\\/sdks\\/sdk\\n\1\2/g" -i "$THEOS_INSTALL_SH"
@@ -126,6 +128,7 @@ else
   echo "THEOS already installed at ${THEOS}, skipping install"
 fi
 
+mkdir -p "$THEOS/sdks"
 if [[ "$FORCE" == "1" || ! -d "$SDK_DIR" ]]; then
   curl -L https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz --output "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz"
   xz -d -f "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz"
