@@ -100,8 +100,8 @@ sudo cp "${TRUSTCACHE_DIR}/trustcache" /opt/procursus/bin/
 export PATH="/opt/procursus/bin:/opt/procursus/sbin:$PATH"
 
 echo "[5/8] Set CI-compatible environment variables"
-T2="$(TZ=UTC-2 date +'%Y%m%d_%H%M%S')"
-TS="$(date -j -f "%Y%m%d_%H%M%S" "${T2}" +%s)"
+T2="$(TZ=UTC-2 /bin/date +'%Y%m%d_%H%M%S')"
+TS="$(/bin/date -j -f "%Y%m%d_%H%M%S" "${T2}" +%s)"
 SHASH="$(git rev-parse --short HEAD)"
 export ctime="${T2}"
 export ctimestamp="${TS}"
