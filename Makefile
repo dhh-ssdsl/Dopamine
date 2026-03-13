@@ -1,3 +1,9 @@
+DEFAULT_THEOS := /Users/ssdsl/theos
+ifneq ($(wildcard $(DEFAULT_THEOS)/makefiles/common.mk),)
+export THEOS ?= $(DEFAULT_THEOS)
+else
+export THEOS ?= $(CURDIR)/theos
+endif
 export NIGHTLY ?= 0
 
 ifeq ($(NIGHTLY), 1)

@@ -4,17 +4,19 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  ./build-local-macos.sh [--basebin|--full] [--force]
+  ./build-local-macos.sh [--basebin|--full] [--force] [--persist-env]
 
 Options:
   --basebin   Build BaseBin only (default, same as non-tag CI build)
   --full      Build full project and generate Application/Dopamine.ipa
   --force     Force reinstall/rebuild of cached dependencies
+  --persist-env  Persist THEOS/PATH to ~/.zshrc
 EOF
 }
 
 MODE="basebin"
 FORCE="0"
+PERSIST_ENV="0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --basebin)
@@ -25,6 +27,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force)
       FORCE="1"
+      ;;
+    --persist-env)
+      PERSIST_ENV="1"
       ;;
     -h|--help)
       usage
@@ -38,6 +43,29 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+persist_theos_env() {
+  local rc_file="${HOME}/.zshrc"
+  local marker_begin="# >>> dopamine-theos >>>"
+
+  mkdir -p "$(dirname "${rc_file}")"
+  touch "${rc_file}"
+
+  if grep -Fq "${marker_begin}" "${rc_file}"; then
+    echo "THEOS env already persisted in ${rc_file}, skipping"
+    return
+  fi
+
+  {
+    echo ""
+    echo "${marker_begin}"
+    echo "export THEOS=\"${THEOS}\""
+    echo "export PATH=\"\$THEOS/bin:/opt/procursus/bin:/opt/procursus/sbin:\$PATH\""
+    echo "# <<< dopamine-theos <<<"
+  } >> "${rc_file}"
+
+  echo "Persisted THEOS env to ${rc_file}"
+}
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This script must run on macOS."
@@ -75,10 +103,19 @@ done
 export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix findutils)/libexec/gnubin:$(brew --prefix coreutils)/libexec/gnubin:$PATH"
 
 echo "[3/8] Install THEOS + iPhoneOS16.5 SDK"
-export THEOS="${BASEDIR}/theos"
+DEFAULT_THEOS_HOME="/Users/ssdsl/theos"
+if [[ -n "${THEOS:-}" ]]; then
+  export THEOS="${THEOS}"
+else
+  export THEOS="${THEOS_HOME:-${DEFAULT_THEOS_HOME}}"
+fi
 mkdir -p "$THEOS"
 mkdir -p "$THEOS/sdks"
 SDK_DIR="${THEOS}/sdks/iPhoneOS16.5.sdk"
+
+if [[ "$PERSIST_ENV" == "1" ]]; then
+  persist_theos_env
+fi
 
 if [[ "$FORCE" == "1" || ! -f "${THEOS}/makefiles/common.mk" ]]; then
   THEOS_INSTALL_SH="${BASEDIR}/install-theos.sh"
